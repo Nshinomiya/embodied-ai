@@ -1,119 +1,132 @@
 # Session Handover
 
-**最終更新:** 2026-04-28 20:18
+**最終更新:** 2026-04-28 22:35
 
 ---
 
 ## 前提と目的 (Context & Intent)
 
-screen-read サブプロジェクトの **オーケストレーション層** を実装するセッション。前回までで `screen_read/merge.py`（決定論的ページ結合）と `screen_read/preprocess.py`（撮影前処理）のロジックは出来ていたが、これらを実運用で繋ぐ「撮影 → 前処理 → OCR → 疑義 → 結合 → Obsidian 保存」のフロー本体がまだなかった。
+screen-read 実装を **机上完成** から **実機通電** に移すセッション。前回までで skill + helper CLI のオーケストレーションが揃っていたので、本セッションは Tapo C220 で実画面（VSCode 日本語・ダークテーマ）を撮影 → Gemini Flash OCR → frontmatter 付き Markdown 保存までエンドツーエンドで通すことを目標にした。
 
-ユーザーから「スラッシュコマンドは `commands` ではなく `skills` では？」という方針指摘を受け、自然言語で自動発動させたいフローは `.claude/skills/<name>/` に置くと整理。スコープも改めて確認し、skill はプロジェクトスコープ（embodied-ai リポジトリ内）で実装する方針で進めた。
+加えて、wifi-cam-mcp `see` の戻り値スキーマが不明だった件、ダークモード可否、`---END---` の必須性、PTZ 自動アイミングの可否といった運用上の疑問を実機で潰した。
 
 ---
 
 ## 成果と変更箇所 (Outcomes & Changed Files)
 
-### 既コミット（本セッションで作成）
+### 既コミット（前セッションまで、本セッション開始時の HEAD）
 
-- `518ddf7` feat(screen-read): add skill and CLI helper for capture-to-vault flow
-  - `.claude/skills/screen-read/SKILL.md`（新規） — オーケストレーション本体
-  - `.claude/skills/screen-read/scripts/screen_read_helper.py`（新規） — JSON 出力 CLI ヘルパー
+- `77e34ca` docs: update handover and chronicle for screen-read skill session
 
-### コミット内容詳細
+### 未コミット（本セッションで作業中）
 
-- **`.claude/skills/screen-read/SKILL.md`**
-  - frontmatter: `name: screen-read`, `description: 孤立PCの画面をWi-Fiカメラで連続撮影しMarkdown化してObsidian Vaultに保存する。...`
-  - フロー: セッション初期化（vault 確認 / `SESSION_ID` / `${SESSION_DIR}` 作成）→ ページループ（撮影 → preprocess → cooldown → OCR → save-page → preview → 疑義検知 → same-page で終了判定）→ merge-save → cleanup
-  - F-15 のシステム指示（プロンプトインジェクション耐性）を OCR プロンプトに inline 記載
-  - F-16 の指数バックオフ（1s → 2s → 4s, 最大 3 回）を OCR ステップに記載
-  - F-7 の終了判定二重化（`---END---` OR pixel-diff `is_same`）
-  - F-12 のレジューム（`${SESSION_DIR}/page-*.json` を保持し、同 SESSION_ID で再開可能）
-  - F-13 の救済 UI（`uncertain_boundaries > 0` で境界画像を並列提示）
+- ` M .claude/skills/screen-read/SKILL.md` — 実機テスト学びを反映
+- `?? docs/archive/handover-20260428-2235.md` — 直前 HANDOVER の退避
 
-- **`.claude/skills/screen-read/scripts/screen_read_helper.py`**
-  - 4 サブコマンド全て JSON 出力 / exit code 0=success, 1=hard error
-  - `preprocess <path>` — `screen_read.preprocess` の `measure_blur` / `strip_exif` / `resize_long_edge` を呼ぶ。blurry 時は `ok: false, blurry: true` で即座に返す（`--force` で続行可）
-  - `same-page <a> <b>` — OpenCV でグレースケール読み込み、サイズ揃えて mean abs diff、閾値 2.0 未満で `is_same: true`
-  - `save-page --session-dir --page --image [--text -]` — stdin から OCR テキストを受け取り `page-NNN.json` で保存。**末尾空白を `.rstrip()` で正規化**（重要）
-  - `merge-save --session-dir [--output] [--vault] [--source]` — 全ページを順番に `best_overlap` + `merge_pages` で結合、`---END---` 除去、frontmatter 付きで Obsidian に保存
-  - `sys.path.insert(0, REPO_ROOT / "screen_read")` で screen_read パッケージを再利用（`uv run --project screen_read` 経由で起動）
+### SKILL.md 変更点
 
-### ドライラン結果
+1. **前提セクション**
+   - 「白背景・黒文字推奨」→ 「ダークテーマでも OK（Gemini Flash は色反転を読める）」
+   - 「`---END---` は必須」→ 「任意（終了判定二重化でカバー）」
+   - プリセット運用方針: 位置調整は Tapo アプリで `screen-read` プリセットを上書き保存 → コード変更不要
 
-```
-preprocess (sharp 3040×3040 jpg + EXIF) → variance 1586.7, size [2000,2000], EXIF 除去確認
-same-page (identical) → mean_abs_diff 0.56, is_same true
-save-page x 2 → merge-save → score 100.0, k=3 overlap, uncertain_boundaries: 0
-```
+2. **セッション初期化** に `mcp__wifi-cam__camera_go_to_preset preset_id="1"` を追加。プリセット token = "1", name = "screen-read"
 
-既存テスト: **20 passed in 1.00s**, ruff clean。
+3. **「1. 撮影」** に実際のファイルパス機構を記載：
+   - `see` は `/tmp/wifi-cam-mcp/capture_<timestamp>.jpg` に自動保存
+   - timestamp は TextContent `Captured image at <timestamp> (<W>x<H>)` から抽出
+   - `cp` でセッション dir にコピーする手順を明示
+
+4. **OCR システム指示** を強化（実害ベースで判明した点）：
+   - エディタ左端の行番号を無視
+   - カメラオーバーレイ日付（左上 "YYYY-MM-DD HH:MM:SS"）を無視
+   - 画面下部 VSCode ステータスバー・ツールバー・デスクトップアイコンを無視
+   - 返答全体の ```markdown フェンスを付けない（PAL 経由 Gemini が付ける癖がある）
+
+### 実機テスト結果（1 ページ・ダークモード VSCode 日本語）
+
+- 撮影: variance 2407（鮮鋭、閾値 100 を大幅クリア）/ 1920×1080 / EXIF strip OK / 自動保存 OK
+- OCR: Gemini 2.5 Flash で 55 行 Markdown を返却。ダークモード（黒背景・白文字・日本語）でも実用レベル
+- save-page → merge-save: `uncertain_boundaries: 0`、frontmatter 正しく付与（`status/seed`, `type/reference`, `source/screen-read`, `created`, `pages`, `refs`）
+- 出力ファイル: `/tmp/screen-read-test01/clip.md`
+
+### 観測された OCR 誤認候補
+
+- `github Zenn` ← `github Issues` の可能性
+- `Advent Calender` ← `Calendar`（画面通りなら正解）
+- 画像左端の見出し的短行（「1day」「github」など）が一部欠落
+
+→ 疑義検知 + Haiku 二次 OCR の価値あり、と判断
 
 ---
 
 ## 検討と意思決定 (Decisions & Rationale)
 
-- **判断:** スラッシュコマンドではなく `.claude/skills/screen-read/SKILL.md` で実装
-  - **理由:** screen-read は「画面を読み取って」と自然言語で頼んだら自動発動するフロー。`.claude/commands/<name>.md` は明示的な `/<name>` タイプを前提とし、エージェントの自律起動には対応しない。skill は frontmatter `description` を見て文脈で発動する
-  - **代替案:** `.claude/commands/screen-read.md` → ユーザーから方針指摘あり却下。両方置く案も検討したが、運用フローが skill 一本で十分
+- **判断:** PTZ 自動アイミングは MVP に入れず、プリセット運用にする
+  - **理由:** Tapo C220 は **光学ズーム非対応**（固定焦点）。auto-aim でセンタリングは可能だがフレーム充填はカメラの物理位置でしか変えられない。一度物理アイミング → プリセット保存 → 以降ノータッチが最小コストで最も安定
+  - **代替案:** OpenCV で明るい矩形検出 → look_left/right/up/down で反復補正 → `auto-aim` サブコマンド追加。実装 100 行程度。要件の Out 「PTZ自動追従」に元々書かれていたので将来拡張で十分
 
-- **判断:** skill 配置はユーザースコープ（`~/.claude/skills/`）ではなくプロジェクトスコープ（`embodied-ai/.claude/skills/`）
-  - **理由:** screen-read は `screen_read/` モジュール / `wifi-cam-mcp` / `docs/要件定義.md` に依存する embodied-ai 専用機能。skill だけユーザースコープに上げるとリポジトリと skill の整合性が壊れる。Git にコミットして再現性を確保する
-  - **代替案:** ユーザースコープ → memory-mcp の DB がユーザースコープなのは「Claude の長期記憶は人格として一つ」だから。skill とは判断基準が違う
+- **判断:** プリセット作成は **wifi-cam-mcp ではなく Tapo アプリ**で行う
+  - **理由:** wifi-cam-mcp は `get_presets` / `go_to_preset` のみで「保存」ツールを持たない。プリセットは ONVIF 経由でカメラ本体ファームウェアに保存される設計。Tapo アプリから書き、MCP から読む分業
+  - **代替案:** wifi-cam-mcp に `create_preset` ツールを追加 → ONVIF `SetPreset` で実装可能だが、Tapo アプリが GUI で完結している今は不要
 
-- **判断:** helper CLI は `JSON 出力 + exit code` で skill と疎結合
-  - **理由:** skill の Bash ステップで stdout を JSON パースしてエージェントが分岐できる。Python から直接呼び出すより skill 文章とのインターフェース境界が明確
-  - **代替案:** Python ライブラリとして直接 import → skill が Python 環境に踏み込む必要があり境界がぼやける
+- **判断:** ダークテーマで運用継続
+  - **理由:** 1 ページ実機テストで Gemini Flash が黒背景・白文字・日本語混在を支障なく読めた。要件定義の「白背景推奨」は OCR 工学的セオリーだが現代 vision モデルでは無視可能
+  - **代替案:** ライトテーマ強制 → ユーザー作業負荷増。誤字率が許容外になった時のみ切替を提案
 
-- **判断:** `save-page` で `text.rstrip()` 正規化
-  - **理由:** OCR レスポンスや `echo -e` で末尾改行 / 空行が入ると `best_overlap` の整列が 1 行分ズレ、`MAX_SHIFT=3` でカバーできない場合がある。ドライランで実際に MERGE_UNCERTAIN を生成してこの問題が顕在化
-  - **代替案:** `best_overlap` 側で末尾 ignorable 行を切り落とす → コアアルゴリズムの挙動が変わるため避けた。境界での正規化のほうが副作用が小さい
-
-- **判断:** MCP 設定の移動は実機テスト後の課題として保留
-  - **理由:** memory-mcp はクロスプロジェクトで使いたい候補だが、現状 1 プロジェクトしか使っていない。`wifi-cam` / `system-temperature` は embodied-ai 専用ハードウェアなので **絶対にプロジェクトスコープ**
-  - **代替案:** 即時で memory のみユーザースコープに昇格 → 実運用で「他プロジェクトでも欲しい」と感じてからで十分
+- **判断:** OCR システム指示に「`/`返答全体に ```markdown フェンスを付けない」を明記
+  - **理由:** 1 ページ実機テストで PAL 経由の Gemini Flash が ` ```markdown\n...\n``` ` で全体を囲んで返してきた。これを skill 側で機械的に剥がすより、システム指示で抑制するほうが確実
+  - **代替案:** save-page で先頭 ```markdown と末尾 ``` を strip → 取りこぼしリスクあり、システム指示の方が責任境界が明確
 
 ---
 
 ## ハマった点・失敗したアプローチ (Friction & Anti-patterns)
 
-- **問題:** ドライランで `merge-save` が `uncertain_boundaries: 1` を返した（本来 score 100 で結合できるべきデータ）
-  - **試したこと:** `echo -e "...\n---END---" | save-page` でテキスト保存
-  - **結果:** echo の trailing newline が末尾の空行となり、`best_overlap` の tail で k=3 整列が 1 行ズレた。`MAX_SHIFT=3` の範囲内だが、empty 行が join_for_compare で混ざるとスコアが大きく下がる
-  - **教訓:** OCR テキストを skill から helper に渡す境界で **必ず `.rstrip()` 正規化**。trailing whitespace は merge アルゴリズムにとって毒になる
+- **問題:** 初回 `see` 実行時、カメラが部屋全体（マゼンタの非テキストモニタ + 横のノート PC）を撮影していた
+  - **試したこと:** プリセット未保存のまま see を実行
+  - **結果:** OCR テストにならず、ユーザーに物理アイミング + プリセット保存を依頼するステップが必要だった
+  - **教訓:** 実機テスト前に **必ずプリセット位置確認**。SKILL.md は最初の `camera_go_to_preset` を必須化済み
 
-- **問題:** `Skill` ツール経由で `/handover` を起動しようとして拒否された
-  - **試したこと:** `Skill(skill="handover", args="docs")` でモデル発動
-  - **結果:** `disable-model-invocation: true` で起動不可。前回セッションでも同じ壁に当たっていた
-  - **教訓:** `disable-model-invocation` の skill は **ユーザーが `/<name>` を打つ** か、テンプレートに従ってエージェントが手動で同等処理を書くしかない。フローの設計時にこの制約を考慮する
+- **問題:** `wifi-cam-mcp` の `see` 戻り値が ImageContent + TextContent で、base64 を skill から扱う術がなさそうに見えた
+  - **試したこと:** ToolSearch で wifi-cam ツール一覧を確認、camera.py を読んだ
+  - **結果:** **`save_to_file=True` がデフォルト**で `/tmp/wifi-cam-mcp/capture_<timestamp>.jpg` に自動保存される設計だった。TextContent の timestamp を見れば file path が確定する。ImageContent の base64 を抽出する必要なし
+  - **教訓:** MCP ツールの **副作用（disk save 等）** はソースを読まないと分からない。戻り値スキーマだけ見て設計するとブロッカーに見える
 
-- **問題:** wifi-cam-mcp の `see` ツールが画像をどう返すか（base64 / file path）が確認できていない
-  - **試したこと:** ドライランは検証用 jpeg を直接 `/tmp/` に置いて pipeline 通過を確認しただけで、実際の `see` 経由の image flow は通していない
-  - **結果:** 実機テスト時に SKILL.md の「1. 撮影」ステップで実装詳細を埋める必要がある（必要なら Bash で base64 デコード or ファイルコピーを挟む）
-  - **教訓:** MCP ツールの **戻り値スキーマ確認** は実装前にやる。今回は paper design で進めた
+- **問題:** PAL 経由 Gemini が返答全体を ` ```markdown ... ``` ` で囲んで返した
+  - **試したこと:** 実画像でテスト
+  - **結果:** 行 1 に ` ```markdown` が入り、merge アルゴリズムや Obsidian 表示に余計なフェンスが残る恐れ
+  - **教訓:** vision モデルは「Markdown を返してください」と言われるとフェンスで囲みがち。**システム指示で明示的に抑制する**
 
 ---
 
 ## 次にやること (Next Steps)
 
-### 1. 実機 1 ページテスト
+### 1. 本セッション分のコミット
 
-1. [ ] `mcp__wifi-cam__see` の戻り値を確認し、画像保存の Bash ステップを SKILL.md の「1. 撮影」に追記
-2. [ ] 500 字 1 ページの実画面を撮影し、preprocess → PAL OCR → save-page → merge-save を通す
-3. [ ] 出力 markdown が要件 F-4 / F-5（保存先・frontmatter）を満たすか確認
+1. [ ] `git add .claude/skills/screen-read/SKILL.md docs/HANDOVER.md docs/CHRONICLE.md docs/archive/handover-20260428-2235.md` → 2 コミットに分けて push（feat: skill 更新 / docs: handover）
 
-### 2. 統合テスト
+### 2. 2 ページ統合テスト（F-3 / F-7）
 
-4. [ ] 3 ページ（1500 字相当）の連続撮影 → 自動結合
-5. [ ] `same-page` 終了判定の閾値（既定 2.0）を実画像で調整
-6. [ ] `BLUR_VARIANCE_THRESHOLD` (100) を実カメラ環境でチューニング
-7. [ ] `MIN_SCORE` / `TAIL_LINES` / `HEAD_LINES` を実 OCR テキストで微調整
+2. [ ] 撮影側 PC で `PgDn` 1 回スクロール（前ページ末尾 5 行が次ページ先頭に残るように調整）
+3. [ ] `mcp__wifi-cam__see` → preprocess → OCR → save-page (page=2)
+4. [ ] `same-page` で page-1.jpg と page-2.jpg を比較し、`is_same: false` を確認
+5. [ ] `merge-save` で 2 ページを結合し `uncertain_boundaries`、`decisions` を確認
 
-### 3. クリーンアップ
+### 3. F-9 疑義検知 + Haiku 二次 OCR の検証
+
+6. [ ] 1 ページテストで誤認候補が出た（`github Zenn` 等）。同じ画像を `model=anthropic/claude-3.5-haiku` で再 OCR し差分を比較
+7. [ ] 疑義検知ヒューリスティック（括弧不整合・インデント揺れ）の実装検討。skill 本文 or helper の新サブコマンドどちらか
+
+### 4. クリーンアップ・運用改善
 
 8. [ ] `wifi-cam-mcp/.env` を削除（認証は `.mcp.json` 集約済み）
 9. [ ] ルーターで C220（`192.168.10.118`）の DHCP 固定割り当て設定
-10. [ ] 実運用後、memory-mcp を `claude mcp add --scope user` でユーザースコープに昇格するか判断
+10. [ ] 実運用後、memory-mcp を `claude mcp add --scope user` でユーザースコープ昇格を判断
+
+### 5. 拡張（将来）
+
+11. [ ] `auto-aim` サブコマンド検討（OpenCV モニター矩形検出 + look_left/right/up/down 反復）。要件定義の Out に既載
+12. [ ] `BLUR_VARIANCE_THRESHOLD` (100) / `MIN_SCORE` (91.0) / `same-page --threshold` (2.0) を実画像で再チューニング
 
 ---
 
@@ -125,38 +138,39 @@ save-page x 2 → merge-save → score 100.0, k=3 overlap, uncertain_boundaries:
 |------|-----|
 | プロジェクト直下 | `/home/slmbrcat/projects/embodied-ai/` |
 | C220 IP | `192.168.10.118`（ONVIF port 2020） |
+| C220 プリセット | token=`"1"`, name=`screen-read`（撮影位置・Tapo アプリで上書き編集可能） |
+| 自動キャプチャ保存先 | `/tmp/wifi-cam-mcp/capture_<timestamp>.jpg` |
 | memory DB | `~/.claude/memories/memory.db` |
-| 接続済み MCP | wifi-cam / memory / system-temperature / sociality |
+| 接続済み MCP | wifi-cam / memory / system-temperature / sociality / pal |
 | screen_read venv | `screen_read/.venv/`（uv 管理、Python 3.13.13） |
 | pytest 結果 | 20 passed (merge 14 + preprocess 6) |
-| skill | `.claude/skills/screen-read/SKILL.md` + `scripts/screen_read_helper.py` |
+| 実機 1 ページテスト出力 | `/tmp/screen-read-test01/clip.md`（55 行） |
 
-### モジュール構成
-
-```
-embodied-ai/
-├── screen_read/
-│   ├── pyproject.toml          # rapidfuzz / [preprocess] / [dev]
-│   ├── merge.py                # 決定論的ページ結合（rapidfuzz）
-│   ├── preprocess.py           # ブレ検知 / EXIF 除去 / リサイズ
-│   ├── tests/
-│   │   ├── test_merge.py       # 14 ケース
-│   │   └── test_preprocess.py  # 6 ケース
-│   └── uv.lock
-└── .claude/skills/screen-read/
-    ├── SKILL.md                # オーケストレーション
-    └── scripts/screen_read_helper.py  # JSON 出力 CLI（preprocess/same-page/save-page/merge-save）
-```
-
-### helper CLI 早見表
+### 実機運用早見表
 
 ```bash
-HELPER='uv run --project screen_read python .claude/skills/screen-read/scripts/screen_read_helper.py'
+# 1. プリセット位置に移動
+# (mcp__wifi-cam__camera_go_to_preset preset_id="1")
 
-$HELPER preprocess /tmp/page.jpg                            # blur+EXIF+resize
-$HELPER same-page /tmp/a.jpg /tmp/b.jpg --threshold 2.0     # 終了判定
-echo "ocr text" | $HELPER save-page --session-dir DIR --page 1 --image /tmp/page.jpg
-$HELPER merge-save --session-dir DIR --vault ~/obsidian-vault --source "メモ"
+# 2. 撮影
+# (mcp__wifi-cam__see) → /tmp/wifi-cam-mcp/capture_<TS>.jpg
+
+# 3. セッション dir にコピー & 前処理
+SD=/tmp/screen-read-${SESSION_ID}; mkdir -p "$SD"
+cp /tmp/wifi-cam-mcp/capture_<TS>.jpg "$SD/page-${page}.jpg"
+HELPER='uv run --project screen_read python .claude/skills/screen-read/scripts/screen_read_helper.py'
+$HELPER preprocess "$SD/page-${page}.jpg"
+
+# 4. OCR (mcp__pal__chat with system prompt) → ocr_text を変数に保存
+
+# 5. ページ保存
+echo "$ocr_text" | $HELPER save-page --session-dir "$SD" --page ${page} --image "$SD/page-${page}.jpg"
+
+# 6. 終了判定（page>1）
+$HELPER same-page "$SD/page-$((page-1)).jpg" "$SD/page-${page}.jpg"
+
+# 7. ループ終了後
+$HELPER merge-save --session-dir "$SD" --vault ~/obsidian-vault --source "メモ"
 ```
 
 ### ドキュメント一覧
@@ -164,4 +178,4 @@ $HELPER merge-save --session-dir DIR --vault ~/obsidian-vault --source "メモ"
 - `docs/アーキテクチャ.md` — コンポーネント・処理シーケンス・リスク表
 - `docs/結合アルゴリズム.md` — RapidFuzz 擬似コード（merge.py の参照元）
 - `docs/CHRONICLE.md` — セッション履歴
-- `docs/archive/handover-20260428-2017.md` — 本セッション直前のスナップショット
+- `docs/archive/handover-20260428-2235.md` — 本セッション直前のスナップショット
