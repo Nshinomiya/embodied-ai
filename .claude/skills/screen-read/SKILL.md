@@ -155,9 +155,27 @@ uv run --project screen_read python \
 JSON が返る：
 - `output`: 書き込んだファイルパス
 - `uncertain_boundaries`: `<!-- MERGE_UNCERTAIN -->` の発生数
-- `decisions`: 各境界の overlap decision
+- `boundaries`: 全境界の配列。各要素に `index`、`uncertain`、`decision`、`prev_image` / `next_image`、`prev_tail` / `next_head`（OCR スニペット末尾／先頭 8 行）
 
-`uncertain_boundaries > 0` の場合は **F-13 救済 UI**: 境界となる前ページ末尾画像と次ページ先頭画像を `mcp__pal__chat` か Read で並列提示し、ユーザーに手修正の手がかりを渡す。
+## F-13 救済 UI
+
+`uncertain_boundaries > 0` の境界に対して、各 `boundaries[*]` の `uncertain: true` を順番に処理する：
+
+1. **境界画像を並列提示**: `Read` ツールで `prev_image` と `next_image` を読み込み、ユーザーに表示する。Vision モデル経由ではなく `Read` を使うのは、PAL の persona injection を避けつつユーザー目視で確認するため
+2. **OCR スニペットも併記**: `prev_tail` / `next_head` をそのままユーザーに見せ、「この境界をどう繋ぐべきか」聞く
+3. **修正案を反映**: ユーザーから受け取ったブリッジテキストを `apply-boundary-fix` で `<!-- MERGE_UNCERTAIN -->` マーカーに置き換える：
+
+```bash
+echo "<USER_PROVIDED_BRIDGE>" | $HELPER apply-boundary-fix \
+  --output "<MERGED_MD_PATH>" \
+  --boundary-index 0
+```
+
+   - `--boundary-index` は **マージ済み Markdown 中の N 番目の `<!-- MERGE_UNCERTAIN -->`**（0-based）。`boundaries` 配列の uncertain 要素を順序通り処理すれば自然と一致する
+   - `--replacement` を空にすると、マーカーを除去するだけ（前後ページを直接連結）になる
+4. **再確認**: `apply-boundary-fix` の戻り値 `remaining_uncertain` が 0 になるまで繰り返す
+
+途中で「もう一度この境界の詳細を見たい」となった場合は `inspect-boundary --boundary-index N` で再取得できる（ページ番号は 0=page1↔page2、1=page2↔page3、…）。
 
 ## クリーンアップ
 

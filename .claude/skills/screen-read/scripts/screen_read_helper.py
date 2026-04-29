@@ -17,6 +17,7 @@ import base64
 import datetime as dt
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -28,7 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCREEN_READ_DIR = REPO_ROOT / "screen_read"
 sys.path.insert(0, str(SCREEN_READ_DIR))
 
-from merge import MAX_PAGES, best_overlap, merge_pages  # noqa: E402
+from merge import MAX_PAGES, best_overlap, merge_pages, split_lines  # noqa: E402
 from preprocess import (  # noqa: E402
     CAPTURE_COOLDOWN_SECONDS,
     measure_blur,
@@ -152,24 +153,48 @@ def cmd_save_page(args: argparse.Namespace) -> int:
     return 0
 
 
+BOUNDARY_SNIPPET_LINES = 8
+
+
 def cmd_merge_save(args: argparse.Namespace) -> int:
-    """Merge all saved pages and write the final Obsidian Markdown."""
+    """Merge all saved pages and write the final Obsidian Markdown.
+
+    Boundaries with ``merge_uncertain == True`` are surfaced in the
+    JSON output with both image paths and OCR snippets (前ページ末尾 +
+    次ページ先頭) so the skill body can drive the F-13 救済 UI without
+    re-reading any files.
+    """
     session_dir = Path(args.session_dir)
     pages = _list_page_files(session_dir)
     if not pages:
         _emit({"ok": False, "error": f"no pages found in {session_dir}"})
         return 1
 
-    texts = [json.loads(p.read_text(encoding="utf-8"))["text"] for p in pages]
+    page_data = [json.loads(p.read_text(encoding="utf-8")) for p in pages]
+    texts = [d["text"] for d in page_data]
     merged = texts[0]
-    decisions: list[dict] = []
+    boundaries: list[dict] = []
     uncertain_count = 0
-    for nxt in texts[1:]:
+    for i, nxt in enumerate(texts[1:]):
         decision = best_overlap(merged, nxt)
         merged, meta = merge_pages(merged, nxt, decision)
-        decisions.append(asdict(decision))
         if meta.merge_uncertain:
             uncertain_count += 1
+        prev_lines = split_lines(texts[i])
+        next_lines = split_lines(nxt)
+        boundaries.append(
+            {
+                "index": i,
+                "prev_page": page_data[i].get("page", i + 1),
+                "next_page": page_data[i + 1].get("page", i + 2),
+                "uncertain": meta.merge_uncertain,
+                "decision": asdict(decision),
+                "prev_image": page_data[i].get("image_path"),
+                "next_image": page_data[i + 1].get("image_path"),
+                "prev_tail": "\n".join(prev_lines[-BOUNDARY_SNIPPET_LINES:]),
+                "next_head": "\n".join(next_lines[:BOUNDARY_SNIPPET_LINES]),
+            }
+        )
 
     merged = merged.replace("---END---", "").rstrip() + "\n"
 
@@ -185,9 +210,80 @@ def cmd_merge_save(args: argparse.Namespace) -> int:
             "output": str(output),
             "page_count": len(pages),
             "uncertain_boundaries": uncertain_count,
-            "decisions": decisions,
+            "boundaries": boundaries,
         }
     )
+    return 0
+
+
+def cmd_inspect_boundary(args: argparse.Namespace) -> int:
+    """Re-emit a single boundary's details for the F-13 救済 UI.
+
+    Used when the skill body wants to revisit a boundary after the
+    initial ``merge-save`` — for example, before applying a hand-fix
+    via ``apply-boundary-fix``.
+    """
+    session_dir = Path(args.session_dir)
+    pages = _list_page_files(session_dir)
+    if args.boundary_index < 0 or args.boundary_index >= len(pages) - 1:
+        _emit({"ok": False, "error": f"boundary_index out of range: {args.boundary_index}"})
+        return 1
+    prev_data = json.loads(pages[args.boundary_index].read_text(encoding="utf-8"))
+    next_data = json.loads(pages[args.boundary_index + 1].read_text(encoding="utf-8"))
+    decision = best_overlap(prev_data["text"], next_data["text"])
+    prev_lines = split_lines(prev_data["text"])
+    next_lines = split_lines(next_data["text"])
+    _emit(
+        {
+            "ok": True,
+            "index": args.boundary_index,
+            "prev_page": prev_data.get("page"),
+            "next_page": next_data.get("page"),
+            "uncertain": not decision.ok,
+            "decision": asdict(decision),
+            "prev_image": prev_data.get("image_path"),
+            "next_image": next_data.get("image_path"),
+            "prev_tail": "\n".join(prev_lines[-BOUNDARY_SNIPPET_LINES:]),
+            "next_head": "\n".join(next_lines[:BOUNDARY_SNIPPET_LINES]),
+        }
+    )
+    return 0
+
+
+def cmd_apply_boundary_fix(args: argparse.Namespace) -> int:
+    """Apply a user-provided replacement to a single ``MERGE_UNCERTAIN`` block.
+
+    Reads the merged Markdown at ``--output``, finds the N-th
+    ``<!-- MERGE_UNCERTAIN ... -->`` marker (0-based ``--boundary-index``),
+    and replaces the surrounding paragraph (the marker plus the blank
+    lines around it) with ``--replacement`` (read from stdin if ``-``).
+
+    The replacement text is inserted verbatim — no normalization. The
+    skill body is responsible for asking the user what should actually
+    bridge the two pages.
+    """
+    output = Path(args.output)
+    if not output.exists():
+        _emit({"ok": False, "error": f"output not found: {output}"})
+        return 1
+    body = output.read_text(encoding="utf-8")
+    pattern = re.compile(r"\n*<!-- MERGE_UNCERTAIN[^>]*-->\n*")
+    matches = list(pattern.finditer(body))
+    if args.boundary_index < 0 or args.boundary_index >= len(matches):
+        _emit(
+            {
+                "ok": False,
+                "error": f"no MERGE_UNCERTAIN marker at index {args.boundary_index} (found {len(matches)})",
+            }
+        )
+        return 1
+    replacement = sys.stdin.read() if args.replacement == "-" else args.replacement
+    bridge = "\n\n" + replacement.strip("\n") + "\n\n" if replacement.strip() else "\n\n"
+    target = matches[args.boundary_index]
+    new_body = body[: target.start()] + bridge + body[target.end() :]
+    output.write_text(new_body, encoding="utf-8")
+    remaining = len(pattern.findall(new_body))
+    _emit({"ok": True, "output": str(output), "remaining_uncertain": remaining})
     return 0
 
 
@@ -349,6 +445,23 @@ def main() -> int:
     p_merge.add_argument("--vault", help="Obsidian vault root for default output path")
     p_merge.add_argument("--source", help="source description for refs:")
     p_merge.set_defaults(func=cmd_merge_save)
+
+    p_inspect = sub.add_parser(
+        "inspect-boundary",
+        help="re-emit a single page boundary's images + OCR snippets (F-13)",
+    )
+    p_inspect.add_argument("--session-dir", required=True)
+    p_inspect.add_argument("--boundary-index", type=int, required=True, help="0-based: 0=between page 1 and 2")
+    p_inspect.set_defaults(func=cmd_inspect_boundary)
+
+    p_apply = sub.add_parser(
+        "apply-boundary-fix",
+        help="replace the N-th MERGE_UNCERTAIN block in the merged Markdown (F-13)",
+    )
+    p_apply.add_argument("--output", required=True, help="path to the merged Markdown produced by merge-save")
+    p_apply.add_argument("--boundary-index", type=int, required=True, help="0-based marker index in the file")
+    p_apply.add_argument("--replacement", default="-", help="bridge text or '-' to read from stdin")
+    p_apply.set_defaults(func=cmd_apply_boundary_fix)
 
     p_ocr = sub.add_parser(
         "ocr",
