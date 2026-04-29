@@ -32,6 +32,7 @@ from merge import MAX_PAGES, best_overlap, merge_pages  # noqa: E402
 from preprocess import (  # noqa: E402
     CAPTURE_COOLDOWN_SECONDS,
     measure_blur,
+    measure_brightness,
     resize_long_edge,
     strip_exif,
 )
@@ -73,6 +74,20 @@ def cmd_preprocess(args: argparse.Namespace) -> int:
         )
         return 0  # not a hard error; orchestrator decides
 
+    brightness = measure_brightness(path)
+    if brightness.is_low_contrast and not args.force:
+        _emit(
+            {
+                "ok": False,
+                "low_contrast": True,
+                "brightness_mean": brightness.mean,
+                "brightness_std": brightness.std,
+                "dark_ratio": brightness.dark_ratio,
+                "hint": "画面が暗いかコントラストが足りません。照明を明るくしてから撮り直してください",
+            }
+        )
+        return 0
+
     strip_exif(path)
     width, height = resize_long_edge(path)
     _emit(
@@ -80,6 +95,10 @@ def cmd_preprocess(args: argparse.Namespace) -> int:
             "ok": True,
             "blurry": blur.is_blurry,
             "variance": blur.variance,
+            "low_contrast": brightness.is_low_contrast,
+            "brightness_mean": brightness.mean,
+            "brightness_std": brightness.std,
+            "dark_ratio": brightness.dark_ratio,
             "size": [width, height],
             "cooldown_seconds": CAPTURE_COOLDOWN_SECONDS,
         }

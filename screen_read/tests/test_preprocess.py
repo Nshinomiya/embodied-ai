@@ -14,8 +14,11 @@ from PIL import Image
 
 from preprocess import (
     BLUR_VARIANCE_THRESHOLD,
+    BRIGHTNESS_MEAN_THRESHOLD,
+    BRIGHTNESS_STD_THRESHOLD,
     RESIZE_LONG_EDGE_MAX,
     measure_blur,
+    measure_brightness,
     resize_long_edge,
     strip_exif,
 )
@@ -96,6 +99,40 @@ def test_strip_exif_removes_metadata(tmp_path: Path) -> None:
 
     with Image.open(path) as after:
         assert not dict(after.getexif())
+
+
+def test_measure_brightness_flags_dark_image(tmp_path: Path) -> None:
+    """暗い画像（mean < BRIGHTNESS_MEAN_THRESHOLD）は low_contrast 判定。"""
+    path = tmp_path / "dark.jpg"
+    rng = np.random.default_rng(seed=2)
+    arr = rng.integers(0, 30, size=(400, 400), dtype=np.uint8)  # mean ~15
+    rgb = np.stack([arr, arr, arr], axis=-1)
+    _save_jpeg(path, rgb)
+    result = measure_brightness(path)
+    assert result.is_low_contrast
+    assert result.mean < BRIGHTNESS_MEAN_THRESHOLD
+
+
+def test_measure_brightness_flags_low_std_image(tmp_path: Path) -> None:
+    """全体的にフラットな画像（std < BRIGHTNESS_STD_THRESHOLD）も low_contrast。"""
+    path = tmp_path / "flat.jpg"
+    arr = np.full((400, 400), 128, dtype=np.uint8)  # uniform mid-gray
+    rgb = np.stack([arr, arr, arr], axis=-1)
+    _save_jpeg(path, rgb)
+    result = measure_brightness(path)
+    assert result.is_low_contrast
+    assert result.std < BRIGHTNESS_STD_THRESHOLD
+
+
+def test_measure_brightness_passes_well_lit_image(tmp_path: Path) -> None:
+    """十分明るくコントラストもある画像は通過する。"""
+    path = tmp_path / "well_lit.jpg"
+    arr = _make_sharp_array()  # 0/255 checkerboard: mean ~127, std ~127
+    _save_jpeg(path, arr)
+    result = measure_brightness(path)
+    assert not result.is_low_contrast
+    assert result.mean >= BRIGHTNESS_MEAN_THRESHOLD
+    assert result.std >= BRIGHTNESS_STD_THRESHOLD
 
 
 def test_strip_exif_pillow_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
