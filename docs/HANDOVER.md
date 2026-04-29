@@ -1,112 +1,119 @@
-# Session Handover
+## Session Handover
 
-**最終更新:** 2026-04-29 14:47
+**最終更新:** 2026-04-29 18:50
 
 ---
 
 ## 前提と目的 (Context & Intent)
 
-前セッション（OCR を OpenRouter 直叩きに切替）の **次に控えていた未実装タスク 2 件**を片付けるサブセッション：
+前セッション（輝度ゲート + F-13 救済 UI 実装）の **次の最優先タスク**だった
+**実機 2 ページ統合テスト**を再挑戦するセッション。今回の検証ターゲット：
 
-1. **preprocess の輝度ゲート追加** — Vision モデルが暗い画像で「読めない」と認めず捏造する silent hallucination の対策（feedback_vision_low_contrast_hallucination.md）
-2. **F-13 救済 UI 実装** — `<!-- MERGE_UNCERTAIN -->` 境界をユーザーが手修正できるフロー
+1. 輝度ゲートが暗所ハルシネーションを撮影前に弾くか
+2. F-13 救済フロー（merge-save → uncertain_boundaries 検出 → Read で画像確認 → apply-boundary-fix）が実用ベースで回るか
+3. Pro 二次 OCR の品質差を改めて 1 セッション通しで観察
 
-両方を実装してコミット済み。次セッションは **実機 2 ページ統合テスト**から再開する想定。
+撮影元 PC のモニターを変更し（前回と同じ Zenn 記事「GitHubで人生を管理する」、4-5 ページ想定）、4 ページ実走した。
 
 ---
 
 ## 成果と変更箇所 (Outcomes & Changed Files)
 
-### コミット履歴（本セッション）
+### コミット
 
-- `ffb738d` feat(screen-read): implement F-13 boundary rescue UI
-- `0e303fb` feat(screen-read): add brightness gate to preprocess pipeline
+このセッションでは **コードもドキュメントも未コミット** — テストで検出された 3 件の改善ポイントは次セッションで実装＋コミットする。
 
-### 1. 輝度ゲート（`0e303fb`）
+### 検証結果（実機 4 ページ走行）
 
-- `screen_read/preprocess.py` — `BrightnessCheck` dataclass + `measure_brightness()` 追加
-  - グレースケール化 → 平均輝度 `mean` + 標準偏差 `std` + 暗部割合 `dark_ratio`（< 50/255 のシェア）
-  - 閾値: `mean < 60` OR `std < 20` で `is_low_contrast: True`
-  - 定数: `BRIGHTNESS_MEAN_THRESHOLD = 60.0` / `BRIGHTNESS_STD_THRESHOLD = 20.0` / `BRIGHTNESS_DARK_PIXEL_VALUE = 50`
-- `screen_read/tests/test_preprocess.py` — 3 ケース追加（暗い画像 / 低 std 画像 / 明るい画像）
-- `.claude/skills/screen-read/scripts/screen_read_helper.py` — `cmd_preprocess` で輝度ゲートを blur と同等扱い（`ok: false, low_contrast: true, hint: "...照明を明るくして..."`）。OK 時も `brightness_mean` / `brightness_std` / `dark_ratio` を JSON に乗せる
-- `.claude/skills/screen-read/SKILL.md` — 前処理セクションに輝度ゲートの分岐、前提に Copilot ポップアップ Esc 操作と jq 依存メモを追加。OCR の `jq -r '.text'` 例を `python -c` ワンライナーに書き換え
+| 項目 | 結果 |
+|------|------|
+| 撮影 4 ページ | `/tmp/screen-read-20260429-165120/page-{1..4}.jpg` |
+| 輝度ゲート | 4 枚すべて通過（mean 113-119, std 70-74, dark_ratio 0.16-0.22） |
+| ブレ検知 | 全枚 variance 613-809（閾値 100 を大幅クリア） |
+| 一次 OCR (Flash) page-1 | 重大な誤字: `Issues` → `Zenes`, `life` → `1ste`, `axross` → `ぁ`, 末尾の数行が完全に再構成（「機能的に〜」が脱落、「に当てはめずに」と化ける） |
+| 二次 OCR (Pro) page-1 〜 page-4 | 固有名詞・記号・コードフェンスがほぼ完璧。$0.05/page。Flash の構造的誤読を直す |
+| same-page 終了判定 | page-2 vs page-3: 60.3、page-3 vs page-4: 74.6（ともに `is_same: false`、終了判定発動せず） |
+| merge-save 1 回目 | クラッシュ（`page-*.ocr.json` glob 衝突。後述） |
+| merge-save 2 回目 | 成功。`uncertain_boundaries: 1`（境界 0: page1↔page2） |
+| F-13 救済 (C 案) | `apply-boundary-fix --replacement -` で空文字 → マーカー除去のみ → `remaining_uncertain: 0` |
+| 最終出力 | `/home/slmbrcat/obsidian-vault/00_Inbox/clip-20260429-1743.md`（page1↔page2 領域に重複が残るが、後段は kk=9/k=17 で正常結合） |
 
-### 2. F-13 救済 UI（`ffb738d`）
+### 検出された 3 件の問題
 
-- `.claude/skills/screen-read/scripts/screen_read_helper.py`:
-  - `cmd_merge_save` の戻り値: `decisions` → `boundaries` に拡張。各境界に `prev_image` / `next_image` / `prev_tail` / `next_head`（OCR スニペット末尾／先頭 8 行）
-  - 新サブコマンド `inspect-boundary --session-dir DIR --boundary-index N` — 個別境界の画像 + スニペット + decision を再取得
-  - 新サブコマンド `apply-boundary-fix --output MD --boundary-index N --replacement TEXT` — マージ済み Markdown 中の N 番目の `<!-- MERGE_UNCERTAIN -->` を手修正テキストで置換、戻り値で `remaining_uncertain` を返す
-- `.claude/skills/screen-read/SKILL.md` — F-13 救済フローを 4 ステップに書き直し（Read で境界画像を並列提示 → スニペット併記 → ユーザーから受けたブリッジを `apply-boundary-fix` で反映 → `remaining_uncertain` が 0 になるまで繰り返す）
+1. **`_list_page_files` glob が OCR 中間ファイルとぶつかる**（`screen_read_helper.py:132`）
+   - `session_dir.glob("page-*.json")` が `page-1.ocr.json` を拾い、`p.stem.split("-")[1]` が `2.ocr` で ValueError
+   - **修正案:** `page-[0-9][0-9][0-9].json` のように 3 桁数字限定パターンへ。あるいは `_ocr_raw/` サブディレクトリ運用を SKILL.md に明文化
+   - 今回の現場対応: OCR JSON を `_ocr_raw/` に手で退避してリトライ
 
-### テスト
+2. **page-N が page-(N-1) を完全包含するケースで overlap 検出が破綻**
+   - 今回 page-2 (Pro) は「という記事があります」（記事中盤）から始まり、page-1 末尾「だって仕事でずっと使ってるんだもん」を**含んだ上でさらに先まで**読んでいた
+   - merge.py は「prev 末尾 K 行 ↔ next 先頭 K 行」マッチを探すので、prev 全体が next の先頭ブロック内に潜んでいる場合は overlap が検出できない
+   - **撮影オペレーション側の対策:** Up キー戻し量を控えめにして「next 先頭 K 行が prev 末尾 K 行と直接重なる」状態を維持する。SKILL.md にこのガイドを追記すべき
+   - **アルゴリズム側の対策（オプション）:** prev 末尾 ↔ next 先頭の包含検査を追加し、包含時は「prev を全部捨てて next を採用」する fallback decision を返す（YAGNI 判断は次回）
 
-- `pytest`: 23 passed (merge 14 + preprocess 9)
-- `ruff check`: clean
-- F-13 dry-run: merge-save → inspect-boundary → apply-boundary-fix の 3 段が連携することを確認
+3. **Flash 品質が境界検出に致命的になり得る**
+   - page-1 を Flash で読んだ時の誤字密度が高すぎ、Pro で読んだ page-2 とのトークン共通度が低くて MIN_SCORE=91 を下回った
+   - page-1 を Pro で再 OCR した後でも、上記 (2) の包含問題で overlap 不検出 — つまり Flash 由来の誤字は本件の根本原因ではなかったが、見た目には見分けがつかなかった
+   - **示唆:** 全ページ Pro 標準にすると $0.20/session 程度。要件の < ¥10 はクリア。「Flash → 疑義検知 → Pro」の二段運用は計算コストの節約にはなるが、品質要求が厳しい用途では Pro 標準も選択肢
 
 ---
 
 ## 検討と意思決定 (Decisions & Rationale)
 
-- **判断:** 輝度ゲートの閾値を `mean < 60` OR `std < 20` の OR 条件にする
-  - **理由:** 「全体が暗い」と「コントラストが足りない」は別の failure mode で、片方ずつ捕捉する必要がある。フラットなグレー画面（mean ≒ 128, std ≒ 0）はブレ検知も輝度平均ゲートも通過してしまうので std を別ゲートで持つ
-  - **代替案:** AND 条件 → 漏れが大きすぎる。`dark_ratio` をしきい値化 → 主指標として使うとライトテーマ画面で誤検知が出やすい。当面は補助メトリクスとして JSON に乗せるだけにとどめた
+- **判断:** F-13 救済では C 案（`apply-boundary-fix --replacement -` で空文字、マーカー除去のみ）を採用
+  - **理由:** 今回の境界 0 は overlap 不検出 + 重複包含という、F-13 の想定範囲外（正常な OCR 揺らぎの吸収用）。重複削除は Markdown 編集で後でやる。F-13 にこのケース用の機能追加は YAGNI
+  - **代替案:** B 案（page-1 を Pro で再 OCR してマージし直す）→ 実施したが (2) の包含問題で同じ結果 → C 案にフォールバック
 
-- **判断:** F-13 救済 UI を「helper の薄いサブコマンド 2 個 + SKILL.md のフロー記述」で実装する
-  - **理由:** 救済 UI は「画像を並べて見せる」「ユーザーの修正案を Markdown に挿入する」の 2 操作だけ。前者は `Read` ツール、後者は `apply-boundary-fix` という単機能 CLI で足り、対話の流れ自体は SKILL.md の自然言語で記述するほうが柔軟性が高い
-  - **代替案:** TUI / Web UI を新規構築 → MVP 範囲外、依存も増える。やめた
-
-- **判断:** `cmd_merge_save` の戻り値フィールドを `decisions` から `boundaries` にリネームし、既存フィールドを残さない
-  - **理由:** 旧フィールドは内部 dry-run でしか使ってなく、外部利用者なし。残すとフィールドが2つに割れて SKILL.md の説明が冗長になる。後方互換は YAGNI
-  - **代替案:** 新フィールドを追加して旧フィールドを残す → 不要
-
-- **判断:** 救済時にユーザーへ画像を見せる手段は `Read` ツール（`mcp__pal__chat` ではない）
-  - **理由:** PAL の persona injection で vision モデルが OCR / 画像描写を拒否する事象を前回確認済み（feedback_pal_ocr_unsuitable.md）。`Read` なら Claude 自身が画像をマルチモーダル入力として受け取り、ユーザーに自然言語で説明できる。PAL を経由する理由がない
-  - **代替案:** OpenRouter 直叩きで境界画像を vision モデルに描写させる → 救済 UI の主体はユーザーの判断であり、別 LLM を挟む価値が低い
+- **判断:** 検出された 3 問題は今セッションでは修正せず、handover で次セッションに渡す
+  - **理由:** 統合テストの「ゴール」は実機での通し動作確認とフロー検証。バグ・運用課題が出たこと自体が成果。今夜の時点で疲労と時刻（18:50）から、修正は別セッションで集中してやる方が安全
+  - **代替案:** 即修正 → glob バグは 1 行修正だが、SKILL.md ガイド追加・Pro 標準化判断が絡むので一括での扱いが望ましい
 
 ---
 
 ## ハマった点・失敗したアプローチ (Friction & Anti-patterns)
 
-特に大きなハマりはなし。輝度ゲートは TDD でスムーズに通り、F-13 も dry-run で一発で通った。`split_lines` を helper に追加 import した点と、`re` 未 import で apply-boundary-fix を書いた点だけ後追いで修正した（コミット前に解消）。
+- **問題:** `merge-save` 初回起動で `ValueError: invalid literal for int() with base 10: '2.ocr'`
+  - **試したこと:** トレースバックを読み `_list_page_files` の glob `page-*.json` が OCR 中間ファイル（`page-1.ocr.json`, `page-2.ocr.json` など）も拾っていることを特定
+  - **結果:** 中間ファイルを `_ocr_raw/` に手で退避してリトライ → 成功。ただし helper 自体のバグなので次セッションで修正必須
 
-唯一の懸念点：
+- **問題:** page-1↔page-2 で overlap が検出されず、Pro で再 OCR しても解決しなかった
+  - **試したこと:** Flash → Pro 再 OCR の B 案を実施したが、`uncertain_boundaries` は依然 1
+  - **結果:** 原因は OCR 品質ではなく、page-2 が page-1 を完全包含する撮影パターン。merge.py のオーバーラップアルゴリズムの構造的限界。撮影オペレーション側で防ぐのが現実的
 
-- **問題:** `boundaries` の `prev_image` / `next_image` は `page-N.json` の `image_path` フィールドを引いているため、`/tmp/wifi-cam-mcp/capture_*.jpg` を指したまま揮発する可能性がある
-  - **試したこと:** 現状の SKILL.md は `cp` で `${SESSION_DIR}/page-${page}.jpg` にコピーしてから `save-page` に渡しているので、`image_path` はセッションディレクトリ配下になる
-  - **教訓:** ただしユーザーが手作業で別パスから `save-page` を呼んだ場合は壊れる。実機テスト後にエッジケースを再確認
+- **問題:** page-1 を Flash で OCR した時、末尾の重要な行（記事の本文「機能的に見ても非常に優秀です。それらの機能を新たに操作を学ばずに今すぐ使いこなせるはずです。」）が誤読され「に当てはめずにすぐに使えるはずです。だって仕事でずっと使ってるんだもん。」というフラグメントに置き換わっていた
+  - **試したこと:** Pro で再 OCR → ほぼ完璧に修正
+  - **結果:** Flash は「画面端で行が切れている／インデント変則」あたりに弱い疑い。SKILL.md の疑義検知シグナル（インデント幅の急変・ASCII/全角混在）に「文の意味的不整合」を追加するか、Pro 標準化の根拠データになる
 
 ---
 
 ## 次にやること (Next Steps)
 
-### 1. 2 ページ統合テスト（実機・再挑戦）— 最優先
+### 1. `_list_page_files` glob 修正（最優先・1 行）
 
-前セッションで詰まっていたタスク。今回の輝度ゲート + F-13 を組み合わせて完走させる。
+1. [ ] `screen_read_helper.py:132` の `session_dir.glob("page-*.json")` を、save-page が生成する 3 桁ゼロパディング名（`page-001.json`〜）に限定するパターンへ変更
+   - 候補 A: `glob("page-[0-9]*.json")` で `2.ocr` 系を除外
+   - 候補 B: `glob("page-[0-9][0-9][0-9].json")` で 3 桁限定（より厳密）
+2. [ ] テスト追加: OCR 中間ファイルが session_dir に共存しても正しい page-NNN.json だけ拾うこと
 
-1. [ ] 撮影元 PC で **Copilot Chat ポップアップを Esc で閉じる**
-2. [ ] 室内照明を十分に明るくする（輝度ゲート通過確認）
-3. [ ] page-1: `mcp__wifi-cam__camera_go_to_preset preset_id="1"` → `see` → `cp` → `preprocess`（`low_contrast: false` を確認） → `ocr` → `save-page`
-4. [ ] PgDn 1 回 + Up キー 5〜10 行戻して overlap を確保
-5. [ ] page-2: 同じ手順
-6. [ ] `merge-save` で `uncertain_boundaries: 0` を確認
-7. [ ] `uncertain_boundaries > 0` なら F-13 フローで救済（境界画像 Read → ユーザーへ確認 → `apply-boundary-fix`）
+### 2. SKILL.md オペレーションガイド追記
 
-### 2. 輝度ゲート閾値の実機チューニング
+3. [ ] 「PgDn 後の Up キー戻し量は 5〜10 行」を「3〜5 行（prev 末尾と next 先頭が確実に直接重なる範囲）」に厳しめへ
+4. [ ] 「OCR 中間ファイル（`page-*.ocr.json`）は session_dir 直下ではなく `_ocr_raw/` サブディレクトリに保存」というフロー注記を追加（または上記 glob 修正で吸収）
 
-8. [ ] 1〜2 セッション運用したら `BRIGHTNESS_MEAN_THRESHOLD` / `BRIGHTNESS_STD_THRESHOLD` を実測値ベースで再調整
-9. [ ] ライトテーマ画面で誤検知（暗いと誤判定）が出ないか観察。出るなら `dark_ratio` を併用するか std 閾値を下げる
+### 3. Pro 標準化の検討
 
-### 3. テスト用画像の永続化（運用改善）
+5. [ ] Flash 一次の品質問題（インデント変則や行端での誤読）が次の 1-2 セッションでも再現するか観察
+6. [ ] 再現するなら一次から `gemini-2.5-pro` に切り替え（要件 < ¥10/session はクリア）。helper の `--model` デフォルトを Pro に変更し、Flash は試験的フォールバックとして残す案
 
-10. [ ] `/tmp/wifi-cam-mcp/capture_*.jpg` が WSL 再起動で消える件、検証用に残したい画像を `docs/test-images/` 等に GC されない場所へコピーする運用を考える
+### 4. 包含 boundary の救済（オプション・YAGNI 寄り）
 
-### 4. クリーンアップ（前回からの持ち越し）
+7. [ ] merge.py で「prev 全体が next の先頭 K 行に部分文字列として含まれるか」をチェックし、含まれる場合「page-(N-1) を全部捨てる」decision を返す機能を追加するか検討
+8. [ ] 上記 7 を入れない場合は、SKILL.md に「重複包含が起きた時の手動編集ガイド」を明記
 
-11. [ ] `wifi-cam-mcp/.env` を削除
-12. [ ] ルーターで C220 DHCP 固定割り当て（192.168.10.118）
+### 5. 持ち越し（前回からの未対応）
+
+9. [ ] `wifi-cam-mcp/.env` を削除
+10. [ ] ルーターで C220 DHCP 固定割り当て（192.168.10.118）
 
 ---
 
@@ -118,68 +125,35 @@
 |------|-----|
 | プロジェクト直下 | `/home/slmbrcat/projects/embodied-ai/` |
 | C220 IP / プリセット | `192.168.10.118` / token=`"1"` name=`screen-read` |
-| 自動キャプチャ保存先 | `/tmp/wifi-cam-mcp/capture_<timestamp>.jpg`（揮発、再起動で消える） |
-| OCR 経路 | OpenRouter API 直叩き |
-| OPENROUTER_API_KEY | 環境変数で export（`~/.bashrc` 等） |
-| 標準モデル | 一次 `google/gemini-2.5-flash` ($0.002/page) / 二次 `google/gemini-2.5-pro` ($0.051/page) |
-| pytest 結果 | 23 passed (merge 14 + preprocess 9) |
-| F-9 検証 | ✅ 完了 |
-| 輝度ゲート | ✅ 実装済み（`measure_brightness`） |
-| F-13 救済 UI | ✅ 実装済み（`inspect-boundary` / `apply-boundary-fix`） |
-| 2 ページ統合テスト | ❌ 未完走（次セッション最優先） |
+| Vault 既定 | `~/obsidian-vault/00_Inbox/`（今回新規作成） |
+| OCR 経路 | OpenRouter 直叩き |
+| 一次モデル | `google/gemini-2.5-flash` ($0.002/page) — 今回 page-1 で品質問題 |
+| 二次モデル | `google/gemini-2.5-pro` ($0.051/page) — 今回主力 |
+| pytest 結果 | 23 passed (前セッションから変化なし) |
+| 輝度ゲート | ✅ 実機通過（mean 113-119, std 70-74） |
+| F-13 救済 UI | ✅ 動作確認（C 案: 空 replacement でマーカー除去） |
+| 2 ページ統合テスト | ✅ 完走（4 ページ実走、ただし 3 件の宿題） |
+| 残バグ | `_list_page_files` glob 衝突（要修正） |
 
-### helper CLI 早見表
+### このセッションの実セッションディレクトリ（残置）
 
-```bash
-HELPER='uv run --project screen_read python .claude/skills/screen-read/scripts/screen_read_helper.py'
+`/tmp/screen-read-20260429-165120/`
+- `page-{1..4}.jpg` — 4 ページ撮影画像
+- `page-00{1..4}.json` — save-page 結果
+- `_ocr_raw/page-*.ocr.json` `_ocr_raw/page-*.pro.json` — 退避した OCR 中間ファイル
+- 再起動で消える可能性あり。検証用に残したい場合は `docs/test-images/` 等にコピー
 
-$HELPER preprocess /tmp/page.jpg                          # blur + brightness + EXIF + resize
-$HELPER same-page /tmp/a.jpg /tmp/b.jpg --threshold 2.0
-$HELPER ocr --image /tmp/page.jpg                          # 一次（gemini-2.5-flash 既定）
-$HELPER ocr --image /tmp/page.jpg --model google/gemini-2.5-pro  # 二次
-echo "$ocr_text" | $HELPER save-page --session-dir DIR --page 1 --image /tmp/page.jpg
-$HELPER merge-save --session-dir DIR --vault ~/obsidian-vault --source "メモ"
-# F-13 救済
-$HELPER inspect-boundary --session-dir DIR --boundary-index 0
-echo "<bridge>" | $HELPER apply-boundary-fix --output OUT.md --boundary-index 0
-```
+### 出力 Markdown
 
-### preprocess JSON フィールド
-
-```json
-{
-  "ok": true,
-  "blurry": false, "variance": 2407.3,
-  "low_contrast": false, "brightness_mean": 132.5, "brightness_std": 78.4, "dark_ratio": 0.12,
-  "size": [1920, 1080],
-  "cooldown_seconds": 0.5
-}
-```
-
-### merge-save JSON フィールド（境界）
-
-```json
-{
-  "ok": true,
-  "output": "...",
-  "page_count": 2,
-  "uncertain_boundaries": 1,
-  "boundaries": [
-    {
-      "index": 0,
-      "prev_page": 1, "next_page": 2,
-      "uncertain": true,
-      "decision": {"ok": false, "k": 0, "score": 0.0, "reason": "..."},
-      "prev_image": "...", "next_image": "...",
-      "prev_tail": "...", "next_head": "..."
-    }
-  ]
-}
-```
+`/home/slmbrcat/obsidian-vault/00_Inbox/clip-20260429-1743.md`
+- 4 ページ統合済み
+- page1↔page2 領域に重複（行 33-55 付近）が残存。手動編集で削除可能
+- frontmatter に `uncertain_boundaries: 1` の記録あり（救済後の更新は次セッションで検討）
 
 ### ドキュメント
+
 - `docs/要件定義.md` — F-1〜F-16 機能要件
 - `docs/アーキテクチャ.md` — シーケンス図
 - `docs/結合アルゴリズム.md` — RapidFuzz 擬似コード
 - `docs/CHRONICLE.md` — セッション履歴
-- `docs/archive/handover-20260429-1447.md` — 本セッション直前のスナップショット
+- `docs/archive/handover-20260429-1850.md` — 本セッション直前のスナップショット

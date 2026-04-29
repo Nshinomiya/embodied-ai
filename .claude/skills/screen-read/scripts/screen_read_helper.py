@@ -129,7 +129,12 @@ def cmd_same_page(args: argparse.Namespace) -> int:
 
 
 def _list_page_files(session_dir: Path) -> list[Path]:
-    return sorted(session_dir.glob("page-*.json"), key=lambda p: int(p.stem.split("-")[1]))
+    # Match save-page output (`page-NNN.json`, 3-digit zero-padded) only.
+    # Looser globs also pick up OCR intermediates like `page-1.ocr.json`.
+    return sorted(
+        session_dir.glob("page-[0-9][0-9][0-9].json"),
+        key=lambda p: int(p.stem.split("-")[1]),
+    )
 
 
 def cmd_save_page(args: argparse.Namespace) -> int:
