@@ -91,3 +91,6 @@ references/
 # Per-person seeds for relationship-mcp (contain private facts)
 .local/
 
+# screen-read test image archive (private screen captures, large files)
+docs/test-images/
+

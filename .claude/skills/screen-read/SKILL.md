@@ -188,7 +188,7 @@ echo "<USER_PROVIDED_BRIDGE>" | $HELPER apply-boundary-fix \
 rm -rf "${SESSION_DIR}"
 ```
 
-ただしユーザーが「画像を残してほしい」と明示した場合のみ保留可。
+ただしユーザーが「画像を残してほしい」と明示した場合のみ保留可。検証用に特定画像を後から見直したい場合は `docs/test-images/` 配下にコピーする運用（`.gitignore` 済み、コミットされない）。
 
 ## 失敗時のレジューム
 
