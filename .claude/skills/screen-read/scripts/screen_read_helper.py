@@ -39,8 +39,8 @@ from preprocess import (  # noqa: E402
 )
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_OCR_MODEL = "google/gemini-2.5-flash"
-DEFAULT_SECOND_OCR_MODEL = "google/gemini-2.5-pro"
+DEFAULT_OCR_MODEL = "google/gemini-2.5-pro"
+DEFAULT_SECOND_OCR_MODEL = "google/gemini-2.5-flash"
 RETRY_HTTP_CODES = {429, 500, 502, 503, 504}
 OCR_SYSTEM_PROMPT = """\
 あなたは画面 OCR エージェントです。画像に映る文字列を逐語で Markdown として返してください。
