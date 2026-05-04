@@ -432,7 +432,7 @@ def reflect_on_change(horizon_days: int = 7) -> dict[str, Any]:
 
 @mcp.tool()
 def compose_interaction_context_tool(
-    person_id: str | None = "kouta",
+    person_id: str | None = "natsuko",
     channel: str = "chat",
     user_text: str | None = None,
     autonomous_trigger: str | None = None,
@@ -686,7 +686,7 @@ async def _handle_http(reader: __import__("asyncio").StreamReader, writer: __imp
             stores = _stores()
             ctx = compose_interaction_context(
                 ComposeInteractionContextInput(
-                    person_id=params.get("person_id", ["kouta"])[0],
+                    person_id=params.get("person_id", ["natsuko"])[0],
                     channel=params.get("channel", ["chat"])[0],
                     user_text=params.get("text", [None])[0],
                     autonomous_trigger=params.get("trigger", [None])[0],

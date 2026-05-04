@@ -1,149 +1,130 @@
 # Session Handover
 
-**最終更新:** 2026-05-04 12:30
+**最終更新:** 2026-05-04 16:17
 
 ---
 
 ## 前提と目的 (Context & Intent)
 
-screen-read の実機テストは後回しにし、**memory-mcp と sociality-mcp の機能理解・初期設定**に集中したセッション。前セッションで memory.db が空のまま放置されていたため、システムの仕組みを把握しながら実際に動かすことが目的。
-
-主なアジェンダ：
-1. memory-mcp / sociality-mcp の機能・アーキテクチャの詳細調査
-2. memory.db へのユーザー好みの記録
-3. フック・デーモン類の現状診断
-4. sociality の初期設定に向けた準備
+前セッションで残っていた sociality / memory インフラの残課題を消化するセッション。
+具体的には：
+1. `person_id` のカスタマイズ（フォーク元の "kouta" → 自分の名前）
+2. sociality の初期化（`social.db` 生成）
+3. heartbeat daemon の WSL2 起動（cron 設定）
+4. compose → plan フローの動作確認
 
 ---
 
 ## 成果と変更箇所 (Outcomes & Changed Files)
 
-### git 上の変更
+### git 上の変更（未コミット）
 
-- `socialPolicy.toml` — `person_id = "kouta"` → `person_id = "slmbrCat"` に変更（ユーザーによる手動編集と思われる）
-- `docs/memory-sociality-overview.md` — **新規作成（未コミット）**。memory-mcp / sociality-mcp の機能・ツール・アーキテクチャ・使い分け・設計方針を網羅したリファレンスドキュメント
+- `.claude/hooks/auto-social.sh` — INSERT の `person_id` を `'kouta'` → `'natsuko'` に変更
+- `socialPolicy.toml` — `[[person_rules]]` の `person_id` を `"slmbrCat"` → `"natsuko"` に変更
+- `sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/compose.py` — `_pick_contract` の条件分岐 `"kouta"` → `"natsuko"`（ResponseContract の適用条件）
+- `sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/schemas.py` — `ComposeInteractionContextInput.person_id` のデフォルト値 → `"natsuko"`
+- `sociality-mcp/src/sociality_mcp/server.py` — ツール定義・HTTP エンドポイントのデフォルト `person_id` → `"natsuko"`（2 箇所）
 
-### memory.db への記録（コミット対象外）
+### ランタイム変更（コミット対象外）
 
-4 件の `core` カテゴリ記憶を保存済み：
-
-| 内容 | 重要度 |
-|---|---|
-| 応答スタイル好み（簡潔・根拠重視） | 4 |
-| memory.db 設計方針（CLAUDE.md / Auto Memory との分担） | 5 |
-| カスタマイズ学習の関心方向（認知アーキテクチャ・HRI） | 4 |
-| Obsidian PKM / screen-read 環境 | 4 |
+- `~/.claude/sociality/social.db` — `upsert_person` 呼び出しにより新規生成。`natsuko`（aliases: slmbrCat, Nshinomiya）を登録
+- `crontab` — `* * * * * /home/slmbrcat/projects/embodied-ai/.claude/hooks/heartbeat-daemon.sh` を追加
+- `/tmp/interoception_state.json` — heartbeat daemon 起動により生成済み
 
 ---
 
 ## 検討と意思決定 (Decisions & Rationale)
 
-- **判断:** memory.db をユーザー好み・振る舞い指示の保存先としても使う
-  - **理由:** CLAUDE.md は「全部読む（ダンプ）」だが memory.db は「文脈に合わせて想起（サンプリング）」。文脈依存の好みや傾向には memory.db の方が適している
-  - **分担設計:** CLAUDE.md（グローバル）= 絶対ルール、memory.db = 文脈依存の学習済み好み、Auto Memory = プロジェクト固有の判断基準
+- **判断:** `person_id` を `"slmbrCat"` ではなく `"natsuko"` にした
+  - **理由:** ユーザーの指定による。自分専用なのでハードコードのまま（外部ファイル参照化は不要と判断）
 
-- **判断:** socialPolicy.toml の person_id を `slmbrCat` に変更
-  - **理由:** 実際のユーザー名に合わせる（旧 `kouta` はプレースホルダー）
-  - **影響:** boundary-mcp の `person_rules` が `slmbrCat` で評価されるようになる
+- **判断:** `_pick_contract` の条件分岐を `"natsuko"` に変更した
+  - **理由:** `compose_interaction_context_tool` が `person_id="natsuko"` で呼ばれたとき、`treat_user_as="high-context technical partner"` の ResponseContract が適用される必要があるため。変更しないとデフォルトの空コントラクトになる
 
----
+- **判断:** テストファイル・ベンチマーク・examples 配下の "kouta" は変更しない
+  - **理由:** テストは独立した ID でよく、変更するとテストが壊れる。examples はサンプル用途
 
-## フック・インフラ現状診断
-
-### 動作中 ✅
-
-| コンポーネント | 場所 | 備考 |
-|---|---|---|
-| `auto-recall.sh` | UserPromptSubmit フック | memory HTTP:18900 を叩き関連記憶をコンテキスト注入。毎ターン動作確認済み |
-| `interoception.sh` | UserPromptSubmit フック | daemon 未起動のため時刻・曜日のみ出力（縮退動作） |
-| `memory.db` | `~/.claude/memories/memory.db` | 4 件保存済み |
-
-### 未設定・未動作 ❌
-
-| コンポーネント | 問題 | 対処方針 |
-|---|---|---|
-| `social.db` | `~/.claude/sociality/` ディレクトリごと存在しない | sociality MCP ツール（`upsert_person` 等）を一度呼べば自動生成される |
-| `auto-social.sh` | social.db が存在しないため毎回 exit 0 | social.db 生成後は自動で有効化される |
-| heartbeat daemon | WSL2 では launchd (plist) / systemd が使えない | cron（`crontab -e`）か `/etc/init.d` スタイルで代替する必要あり |
-
-### フック定義場所
-
-`.claude/settings.json` の `UserPromptSubmit` に 3 フック登録済み：
-- `interoception.sh` — `/tmp/interoception_state.json` を読んで体の状態を注入
-- `auto-recall.sh` — memory-mcp HTTP `/recall` を叩いて関連記憶を注入
-- `auto-social.sh` — コウタ（slmbrCat）の発話を social.db に直接 INSERT
-
-heartbeat daemon のスクリプト（`.claude/hooks/heartbeat-daemon.sh`）は存在する。5 秒ごとに arousal / thermal / mem_free を `/tmp/interoception_state.json` に書き出す設計。
+- **判断:** heartbeat daemon を cron で起動（systemd / launchd 不使用）
+  - **理由:** WSL2 では launchd も systemd も使えないため。`crontab -l` で登録確認済み
 
 ---
 
 ## ハマった点・失敗したアプローチ (Friction & Anti-patterns)
 
-- **問題:** social.db の場所を最初 `~/.claude/memories/` と思い込んで確認した
-  - **正解:** `~/.claude/sociality/social.db`（`auto-social.sh` のソースから判明）
-  - **教訓:** sociality-mcp は memory-mcp と別ディレクトリに DB を持つ
+- **問題:** `plan_response_tool` の最初の呼び出しが validation error で失敗
+  - **原因:** `compose` の戻り値から `prompt_summary` と `compact_prompt_block` フィールドを省いて渡した
+  - **対処:** compose の戻り値をそのまま丸ごと `interaction_context` に渡す必要がある。フィールドを手動で選別しない
 
-- **問題:** heartbeat daemon の起動方法が WSL2 と macOS で異なる
-  - **plist ファイル** (`com.embodied-claude.heartbeat.plist`) は macOS launchd 用、WSL2 では無効
-  - **WSL2 での代替:** cron ジョブ（`* * * * * /path/heartbeat-daemon.sh`）が最も単純
+---
+
+## インフラ現状（セッション終了時点）
+
+### 動作中 ✅
+
+| コンポーネント | 場所 | 備考 |
+|---|---|---|
+| `auto-recall.sh` | UserPromptSubmit フック | memory.db から関連記憶をコンテキスト注入 |
+| `interoception.sh` | UserPromptSubmit フック | arousal / mem_free / thermal / phase を毎ターン注入 |
+| `heartbeat-daemon.sh` | cron（1 分ごと） | `/tmp/interoception_state.json` に ring buffer 12 サンプルを書き出し |
+| `auto-social.sh` | UserPromptSubmit フック | social.db に `natsuko` の発話を INSERT |
+| `memory.db` | `~/.claude/memories/memory.db` | core 記憶 4 件保存済み |
+| `social.db` | `~/.claude/sociality/social.db` | `natsuko` 登録済み |
+| compose → plan フロー | sociality-mcp | 動作確認済み。relevant_memories に memory.db の記憶が乗ることを確認 |
+
+### 未設定 ❌
+
+| コンポーネント | 問題 | 対処方針 |
+|---|---|---|
+| 自律ループ | compose → plan が自律的に走る仕組みがない | cron や awake/sleep スキルで実装する必要あり |
+| `ingest_interaction` の定期呼び出し | 会話ログが social.db に溜まっていかない | 応答後に `record_agent_experience` / `ingest_interaction` を呼ぶ運用が必要 |
 
 ---
 
 ## 次にやること (Next Steps)
 
-### 1. sociality 初期化（最優先）
+### 1. 変更をコミット
 
 ```bash
-# upsert_person で slmbrCat を登録 → social.db が自動生成される
-# MCP ツールを Claude に頼んで呼んでもらうか、直接 MCP 経由で実行
-# person_id は socialPolicy.toml と一致させる
+git add .claude/hooks/auto-social.sh socialPolicy.toml \
+  sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/compose.py \
+  sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/schemas.py \
+  sociality-mcp/src/sociality_mcp/server.py
+git commit -m "chore: rename person_id kouta → natsuko across sociality stack"
 ```
 
-1. [ ] `mcp__sociality__upsert_person` を呼んで `slmbrCat` を登録
-2. [ ] `~/.claude/sociality/social.db` が生成されたことを確認（`ls ~/.claude/sociality/`）
-3. [ ] `auto-social.sh` が動き出すことを確認（次のメッセージ送信後に実行されるはず）
+### 2. ingest_interaction の運用設計
 
-### 2. heartbeat daemon を WSL2 で起動
+1. [ ] 応答後に `ingest_interaction` を呼ぶタイミング・自動化方法を検討
+2. [ ] `record_agent_experience` を応答ループに組み込む
 
-4. [ ] cron で heartbeat-daemon.sh を定期実行するよう設定：
-   ```bash
-   crontab -e
-   # 追加: * * * * * /home/slmbrcat/projects/embodied-ai/.claude/hooks/heartbeat-daemon.sh
-   ```
-5. [ ] `/tmp/interoception_state.json` が生成されることを確認
-6. [ ] interoception フックが arousal / thermal / mem_free を出力するようになることを確認
+### 3. 自律ループの実装
 
-### 3. compose → plan フローの試運転
+3. [ ] `/awake` スキルの内容を確認し、compose → plan → act の自律フローを組み込めるか検討
+4. [ ] quiet_hours（00:00〜07:00）中の自律 tick で `write_private_reflection` が選ばれることを実機確認
 
-7. [ ] `mcp__sociality__compose_interaction_context_tool` を呼んで InteractionContext を確認
-8. [ ] `mcp__sociality__plan_response_tool` で ResponsePlan を取得
-9. [ ] memory.db の記憶が `relevant_memories` に乗ってくることを確認
+### 4. daybook の初期化
 
-### 4. socialPolicy.toml の変更をコミット
-
-10. [ ] `socialPolicy.toml` の `person_id = "slmbrCat"` 変更をコミット
-11. [ ] `docs/memory-sociality-overview.md` を合わせてコミット
+5. [ ] `append_daybook` を一度呼んで self_summary を生成する（現在 `latest_daybook: null`）
+6. [ ] `get_self_summary` で自己要約が compose に乗ることを確認
 
 ---
 
 ## 参考情報
 
-### フックファイル一覧（`.claude/hooks/`）
+### person_id 変更箇所まとめ
 
-```
-interoception.sh        # UserPromptSubmit: 体の状態注入
-auto-recall.sh          # UserPromptSubmit: memory.db から連想想起
-auto-social.sh          # UserPromptSubmit: 発話を social.db に記録
-continue-check.sh       # Stop フック
-post-compact-recovery.sh # SessionStart(compact) フック
-heartbeat-daemon.sh     # daemon 本体（cron で実行する）
-install-heartbeat.sh    # macOS launchd インストーラ（WSL2 では不使用）
-com.embodied-claude.heartbeat.plist  # macOS launchd 設定（WSL2 では不使用）
-```
+| ファイル | 変更箇所 |
+|---|---|
+| `auto-social.sh:51` | INSERT の person_id |
+| `compose.py:336` | `_pick_contract` の条件分岐 |
+| `schemas.py:49` | `ComposeInteractionContextInput` デフォルト値 |
+| `server.py:435` | `compose_interaction_context_tool` 引数デフォルト |
+| `server.py:689` | HTTP エンドポイントのデフォルト |
+| `socialPolicy.toml:17` | `[[person_rules]]` |
 
 ### DB パス
 
 | DB | パス |
 |---|---|
 | memory.db | `~/.claude/memories/memory.db` |
-| social.db | `~/.claude/sociality/social.db`（未作成） |
+| social.db | `~/.claude/sociality/social.db` |

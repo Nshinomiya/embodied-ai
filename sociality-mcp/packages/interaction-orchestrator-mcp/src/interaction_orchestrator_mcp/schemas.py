@@ -46,7 +46,7 @@ class ComposeInteractionContextInput(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    person_id: str | None = "kouta"
+    person_id: str | None = "natsuko"
     channel: Channel = "chat"
     user_text: str | None = None
     autonomous_trigger: str | None = None
