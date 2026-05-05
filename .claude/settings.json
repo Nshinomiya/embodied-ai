@@ -30,15 +30,6 @@
             "timeout": 4
           }
         ]
-      },
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/auto-social.sh",
-            "timeout": 3
-          }
-        ]
       }
     ],
     "Stop": [
