@@ -1,130 +1,189 @@
 # Session Handover
 
-**最終更新:** 2026-05-04 16:17
+**最終更新:** 2026-05-05 13:32
 
 ---
 
 ## 前提と目的 (Context & Intent)
 
-前セッションで残っていた sociality / memory インフラの残課題を消化するセッション。
-具体的には：
-1. `person_id` のカスタマイズ（フォーク元の "kouta" → 自分の名前）
-2. sociality の初期化（`social.db` 生成）
-3. heartbeat daemon の WSL2 起動（cron 設定）
-4. compose → plan フローの動作確認
+前セッションで sociality インフラの初期化（person_id 統一・social.db 生成・heartbeat daemon 起動・compose→plan 動作確認）が完了した状態でスタート。
+
+このセッションは **コード変更ゼロの設計フェーズ**。残課題だった「`ingest_interaction` / `record_agent_experience` の運用設計」を起点に、プロジェクト全体の設計思想と Claude Code 機構（CLAUDE.md / rules / skills / hooks）の住み分けを再整理した。
+
+主な議題：
+1. `record_agent_experience` の運用は自動化（フック）か、Claude の自律判断か
+2. auto-social.sh の存在意義（直 INSERT で解釈レイヤーをスキップしている問題）
+3. CLAUDE.md が 424 行に肥大化しており、参照効率が落ちている
+4. プロジェクトの設計原則を「身体メタファー三層」で再整理する
 
 ---
 
 ## 成果と変更箇所 (Outcomes & Changed Files)
 
-### git 上の変更（未コミット）
+**コード変更なし**（設計議論のみ）。git status は clean。
 
-- `.claude/hooks/auto-social.sh` — INSERT の `person_id` を `'kouta'` → `'natsuko'` に変更
-- `socialPolicy.toml` — `[[person_rules]]` の `person_id` を `"slmbrCat"` → `"natsuko"` に変更
-- `sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/compose.py` — `_pick_contract` の条件分岐 `"kouta"` → `"natsuko"`（ResponseContract の適用条件）
-- `sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/schemas.py` — `ComposeInteractionContextInput.person_id` のデフォルト値 → `"natsuko"`
-- `sociality-mcp/src/sociality_mcp/server.py` — ツール定義・HTTP エンドポイントのデフォルト `person_id` → `"natsuko"`（2 箇所）
-
-### ランタイム変更（コミット対象外）
-
-- `~/.claude/sociality/social.db` — `upsert_person` 呼び出しにより新規生成。`natsuko`（aliases: slmbrCat, Nshinomiya）を登録
-- `crontab` — `* * * * * /home/slmbrcat/projects/embodied-ai/.claude/hooks/heartbeat-daemon.sh` を追加
-- `/tmp/interoception_state.json` — heartbeat daemon 起動により生成済み
+このセッションの成果はすべて「次セッションで実装するための設計合意」として本 HANDOVER に記録される。
 
 ---
 
 ## 検討と意思決定 (Decisions & Rationale)
 
-- **判断:** `person_id` を `"slmbrCat"` ではなく `"natsuko"` にした
-  - **理由:** ユーザーの指定による。自分専用なのでハードコードのまま（外部ファイル参照化は不要と判断）
+### 1. 設計の基礎は「身体メタファー三層モデル」
 
-- **判断:** `_pick_contract` の条件分岐を `"natsuko"` に変更した
-  - **理由:** `compose_interaction_context_tool` が `person_id="natsuko"` で呼ばれたとき、`treat_user_as="high-context technical partner"` の ResponseContract が適用される必要があるため。変更しないとデフォルトの空コントラクトになる
+| 層 | 性質 | 該当処理 |
+|---|---|---|
+| **下位層（不随意・知覚）** | 自動化 OK | interoception / auto-recall / heartbeat-daemon |
+| **上位層（随意・行動）** | Claude が判断して呼ぶ | ingest_interaction / record_agent_experience / append_daybook |
+| **メタ層（自己認識補助）** | 自動化 OK（行動は強制しない） | 「最後の experience 記録から N ターン経過」を compose 戻り値に注入する等 |
 
-- **判断:** テストファイル・ベンチマーク・examples 配下の "kouta" は変更しない
-  - **理由:** テストは独立した ID でよく、変更するとテストが壊れる。examples はサンプル用途
+- **判断:** 上位層の自動化は embodied AI の設計思想に反するため避ける
+  - **理由:** Claude Code に自律性を持たせることがプロジェクト目的。スクリプト自動化で行動を肩代わりすると主体性が消える
+  - **代替案:** Stop フックで record_agent_experience を自動呼び出し → 不採用（応答テキストをフックから取得しづらく、summary が空 or 固定文になる）
 
-- **判断:** heartbeat daemon を cron で起動（systemd / launchd 不使用）
-  - **理由:** WSL2 では launchd も systemd も使えないため。`crontab -l` で登録確認済み
+### 2. auto-social.sh は廃止する
+
+- **判断:** 廃止し、Claude 自身が `ingest_interaction` を呼ぶ運用に切り替える
+  - **理由:** auto-social.sh は SQLite に直 INSERT しており、`_update_open_loops` と `refresh_snapshot` という解釈処理をスキップしている。知覚にも行動にもなれていない中途半端な層
+  - **重要な確認:** 「セッションログがあるから記録不要」は **誤り**。session log は生テキストの完全記録だが、social.db は構造化された解釈・自己モデルで別物。social.db が空になると compose の `recent_events` / `recent_experiences` が機能不全になり、`get_person_model` の snapshot が古くなる
+
+### 3. CLAUDE.md / rules / skills の住み分け
+
+参考記事: https://qiita.com/nogataka/items/d6c83ea50b82e1c2602c
+
+| 機構 | 役割 | サイズ目安 |
+|---|---|---|
+| CLAUDE.md | プロジェクト全体の最小限 | 30-35 行 |
+| `.claude/rules/` | パス条件付き規約 | 1 ファイル 10-20 行 |
+| `.claude/skills/` | タスク単位のフロー | タスクの粒度に応じて |
+| `.claude/hooks/` | 知覚層・メタ層 | （記事範囲外） |
+
+- **判断:** 現在の CLAUDE.md（424 行）から MCP ツール一覧と Heartbeat Protocol を切り出す
+  - **理由:** CLAUDE.md は user message として注入されるため位置バイアスで減衰する。セッション後半で Heartbeat Protocol が無視されているのは構造的問題
+  - **配置先:** MCP ツール表 → rules（パス別）、Heartbeat Protocol → skills（フェーズ別ではなくタスク別）
+
+### 4. skill 分割は「フェーズ単位」ではなく「タスク単位」
+
+- **判断:** `compose/SKILL.md` `plan/SKILL.md` のようなフェーズ分割は**しない**
+  - **理由:** compose と plan は常にセットで呼ばれるので、毎回 2 つ起動するのは煩雑。記事の skills は「タスク層」でフェーズより粗い粒度
+  - **採用案:** `interaction/SKILL.md`（対話応答ループ全体）/ `autonomous-tick/SKILL.md`（自律 tick）/ `daily-routine/SKILL.md`（daybook ルーチン）/ `boundary-review/SKILL.md`（投稿前レビュー）
+
+### 5. drift 対策はメタ層で
+
+- **判断:** SKILL.md に「呼べ」と書くだけでは Claude は忘れる（CLAUDE.md の Heartbeat Protocol が今日まで一度も呼ばれていないのが証拠）
+  - **対策:**
+    - `plan_response_tool` の `followup_action` を**契約**として SKILL.md で明文化（無視できないルール化）
+    - メタ層フックで「最後の experience 記録から N ターン経過」を compose 戻り値に注入
+    - Stop フックで「followup pending」警告（行動は強制せず Claude に気づかせる）
 
 ---
 
 ## ハマった点・失敗したアプローチ (Friction & Anti-patterns)
 
-- **問題:** `plan_response_tool` の最初の呼び出しが validation error で失敗
-  - **原因:** `compose` の戻り値から `prompt_summary` と `compact_prompt_block` フィールドを省いて渡した
-  - **対処:** compose の戻り値をそのまま丸ごと `interaction_context` に渡す必要がある。フィールドを手動で選別しない
+このセッションは設計議論のみのため、コード起因の friction はなし。
 
----
+ただし議論中に判明した既存の構造的問題：
 
-## インフラ現状（セッション終了時点）
+- **問題:** auto-social.sh は MCP を経由せず SQLite に直 INSERT しているため、open_loop 検出と person snapshot 更新が走らない
+  - **影響:** 現状すでに person_model が古いまま。社会的記憶の解釈レイヤーが機能不全
+  - **対処方針:** 廃止して Claude 自身の `ingest_interaction` 呼び出しに置き換える
 
-### 動作中 ✅
-
-| コンポーネント | 場所 | 備考 |
-|---|---|---|
-| `auto-recall.sh` | UserPromptSubmit フック | memory.db から関連記憶をコンテキスト注入 |
-| `interoception.sh` | UserPromptSubmit フック | arousal / mem_free / thermal / phase を毎ターン注入 |
-| `heartbeat-daemon.sh` | cron（1 分ごと） | `/tmp/interoception_state.json` に ring buffer 12 サンプルを書き出し |
-| `auto-social.sh` | UserPromptSubmit フック | social.db に `natsuko` の発話を INSERT |
-| `memory.db` | `~/.claude/memories/memory.db` | core 記憶 4 件保存済み |
-| `social.db` | `~/.claude/sociality/social.db` | `natsuko` 登録済み |
-| compose → plan フロー | sociality-mcp | 動作確認済み。relevant_memories に memory.db の記憶が乗ることを確認 |
-
-### 未設定 ❌
-
-| コンポーネント | 問題 | 対処方針 |
-|---|---|---|
-| 自律ループ | compose → plan が自律的に走る仕組みがない | cron や awake/sleep スキルで実装する必要あり |
-| `ingest_interaction` の定期呼び出し | 会話ログが social.db に溜まっていかない | 応答後に `record_agent_experience` / `ingest_interaction` を呼ぶ運用が必要 |
+- **問題:** CLAUDE.md の Heartbeat Protocol が記述されているのに一度も実行されていない
+  - **原因:** CLAUDE.md は user message として注入されるが、セッション後半で位置バイアスにより参照されない
+  - **対処方針:** skills に切り出して、必要なタイミングで明示的に load されるようにする
 
 ---
 
 ## 次にやること (Next Steps)
 
-### 1. 変更をコミット
+優先順位順。**機能停止期間ゼロで段階移行する**ことが目的。
 
-```bash
-git add .claude/hooks/auto-social.sh socialPolicy.toml \
-  sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/compose.py \
-  sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/schemas.py \
-  sociality-mcp/src/sociality_mcp/server.py
-git commit -m "chore: rename person_id kouta → natsuko across sociality stack"
-```
+### Step 1: `interaction/SKILL.md` を新設（最優先）
 
-### 2. ingest_interaction の運用設計
+auto-social.sh を廃止する前に、運用ループの受け皿を先に作る。
 
-1. [ ] 応答後に `ingest_interaction` を呼ぶタイミング・自動化方法を検討
-2. [ ] `record_agent_experience` を応答ループに組み込む
+1. [ ] `.claude/skills/interaction/SKILL.md` を作成
+2. [ ] 内容: compose → plan → act → ingest_interaction + record_agent_experience の明示的フロー
+3. [ ] `plan_response_tool` の `followup_action` を「無視できない契約」として明文化
+4. [ ] `record_agent_experience` の `kind` 体系（reply / boundary_respected / open_loop_progress / agent_private_reflection など）を整理して記載
 
-### 3. 自律ループの実装
+### Step 2: auto-social.sh を廃止
 
-3. [ ] `/awake` スキルの内容を確認し、compose → plan → act の自律フローを組み込めるか検討
-4. [ ] quiet_hours（00:00〜07:00）中の自律 tick で `write_private_reflection` が選ばれることを実機確認
+5. [ ] `.claude/hooks/auto-social.sh` を削除
+6. [ ] `.claude/settings.json` から該当エントリを除去
+7. [ ] commit message: `chore(hooks): remove auto-social.sh in favor of skill-based ingest_interaction`
 
-### 4. daybook の初期化
+### Step 3: CLAUDE.md を縮約
 
-5. [ ] `append_daybook` を一度呼んで self_summary を生成する（現在 `latest_daybook: null`）
-6. [ ] `get_self_summary` で自己要約が compose に乗ることを確認
+8. [ ] CLAUDE.md から MCP ツール一覧表を削除（rules へ移管）
+9. [ ] CLAUDE.md から Heartbeat Protocol を削除（`interaction/SKILL.md` へ移管）
+10. [ ] CLAUDE.md から WSL2 注意事項・カメラ設定詳細を削除（rules へ移管）
+11. [ ] 残すのは: プロジェクト概要 / 三層モデル宣言 / ディレクトリ構造（簡略） / rules・skills への誘導
+
+### Step 4: `.claude/rules/` の段階的構築
+
+一気に作らず、サブプロジェクト編集時に必要に応じて切り出す。
+
+12. [ ] `python-mcp-dev.md` → `paths: */src/*_mcp/**/*.py`（uv / pytest / ruff）
+13. [ ] `wifi-cam.md` → `paths: wifi-cam-mcp/**/*.py`（Tapo / Imou の差異）
+14. [ ] `tts.md` → `paths: tts-mcp/**/*.py`（感情タグ / voice / speaker 切替）
+15. [ ] `social-policy.md` → `paths: socialPolicy.toml`（書き方）
+16. [ ] `mcp-server-design.md` → `paths: **/server.py`（MCP tool 設計規約）
+17. [ ] **重要:** `paths` フィールドは YAML 配列ではなく**カンマ区切り**で書く（記事のバグ指摘）
+
+### Step 5: メタ層フックの追加（運用が回り始めてから）
+
+18. [ ] post-response フックで「followup pending」警告
+19. [ ] compose 戻り値に「最後の experience 記録から N ターン」を注入する仕組み
+
+### Step 6: 残課題（前セッションから持ち越し）
+
+20. [ ] daybook の初期化（`append_daybook` 一度呼んで `latest_daybook: null` を解消）
+21. [ ] quiet_hours 中の自律 tick で `write_private_reflection` が選ばれることを実機確認
 
 ---
 
 ## 参考情報
 
-### person_id 変更箇所まとめ
+### 三層モデル × Claude Code 機構の対応表
 
-| ファイル | 変更箇所 |
-|---|---|
-| `auto-social.sh:51` | INSERT の person_id |
-| `compose.py:336` | `_pick_contract` の条件分岐 |
-| `schemas.py:49` | `ComposeInteractionContextInput` デフォルト値 |
-| `server.py:435` | `compose_interaction_context_tool` 引数デフォルト |
-| `server.py:689` | HTTP エンドポイントのデフォルト |
-| `socialPolicy.toml:17` | `[[person_rules]]` |
+| 身体メタファー \ Claude Code | CLAUDE.md | rules | skills | hooks |
+|---|---|---|---|---|
+| **下位層（知覚）** | - | - | - | ✅ interoception / auto-recall / heartbeat |
+| **上位層（行動）** | 行動原則のみ | パス別規約 | タスク別フロー | - |
+| **メタ層（自己認識）** | - | - | - | ✅ post-response 警告（追加予定） |
 
-### DB パス
+### 参考記事
 
-| DB | パス |
-|---|---|
-| memory.db | `~/.claude/memories/memory.db` |
-| social.db | `~/.claude/sociality/social.db` |
+- https://qiita.com/nogataka/items/d6c83ea50b82e1c2602c
+  - CLAUDE.md は 30-35 行に絞る
+  - rules はパス条件付きで注入され、セッション後半でも効果維持
+  - skills はタスク層
+  - frontmatter `paths` は YAML 配列だとパースバグ → カンマ区切り必須
+
+### 既存の skills
+
+- `screen-read/SKILL.md` — 既存（変更不要）
+
+### auto-social.sh の現状（廃止対象）
+
+ファイル: `.claude/hooks/auto-social.sh`
+動作: UserPromptSubmit で stdin から prompt を受け取り、`social.db` の events テーブルに `human_utterance` として直 INSERT。
+
+問題点:
+- MCP を経由しないため `_update_open_loops` / `refresh_snapshot` が走らない
+- 解釈処理を飛ばしているので「知覚層」にも「行動層」にもなれていない
+
+### `record_agent_experience` の followup_action ヒント実装
+
+`sociality-mcp/packages/interaction-orchestrator-mcp/src/interaction_orchestrator_mcp/plan.py:312` の `_pick_followup` 関数で、primary_move に応じた experience_kind を返す仕組みは既に実装済み。
+
+```python
+if primary_move in {"write_private_reflection", "compose_letter"}:
+    return {"kind": "record_agent_experience",
+            "experience_kind": "agent_private_reflection" or "agent_file_created"}
+if primary_move == "answer_directly" and ctx.open_loops:
+    return {"kind": "record_agent_experience",
+            "experience_kind": "open_loop_progress"}
+```
+
+`interaction/SKILL.md` ではこの followup を「契約」として参照すること。
