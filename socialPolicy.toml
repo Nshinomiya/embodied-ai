@@ -15,5 +15,5 @@ require_review_if_person_present = true
 
 [[person_rules]]
 person_id = "natsuko"
-avoid_actions = ["camera_speaker_after_midnight"]
+avoid_actions = ["camera_speaker_after_midnight", "loud_voice_during_quiet_hours"]
 preferred_nudge_style = "brief_gentle"
