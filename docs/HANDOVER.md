@@ -1,138 +1,160 @@
 # Session Handover
 
-**最終更新:** 2026-05-07 19:23
+**最終更新:** 2026-05-20 11:23
 
 ---
 
 ## 前提と目的 (Context & Intent)
 
-前セッション（2026-05-06 21:35）で完了した Phase 1（コネクタ層）+ Phase 2（daybook 初期化）に続き、**Phase 3（interaction skill ガイド微調整）を完遂したセッション**。
+前セッション（2026-05-09 10:49）の続き。Phase 1（VOICEVOX 接続）に取り組んだが WSL2 の `networkingMode=mirrored` が反映されない問題に当たっていた。
 
-このセッションの主目的:
-1. SKILL.md の `kind` / `experience_kind` 表記を実 API に揃える（前セッションで発見した validation error の根本対処）
-2. SKILL.md 冒頭に voice 入力時の `voice.speak` 上書きチェックリストを目立つ位置で追加（CLAUDE.md 縮約と同じ位置バイアス対策）
-3. socialPolicy.toml の natsuko ルールを quiet_hours での音声抑制と整合
-4. tts.md にエンジン使い分けガイド + アンチパターン明記
+このセッションの主目的（実際に進んだ範囲）:
+1. mirrored 修復の最終切り分け（Windows 再起動 + ESET 停止後も改善せず確認）
+2. `0.0.0.0` バインドを選ぶ場合のセキュリティ判断を pal consensus で多角的に検証
+3. consensus 試行中に **OpenRouter の課金モデル（max_tokens × 出力単価で事前予約）**, **preview 系モデルの 404**, **モデル可用性事前チェックの skill 化案** など pal 運用のナレッジが得られた
+4. それらを **`docs/pal-openrouter-operations.md` (376 行) として詳細ドキュメント化**
 
-副次的に `/statusline` を 2 段階で構成（PS1 起点 → モデル名/コンテキスト/セッションリミット追加）。これは embodied-ai プロジェクト外（`~/.claude/` 配下）の global config 変更。
-
-**重要**: Phase 3 の編集は完了しているが、**コミットはユーザー判断で拒否された**ため未コミット状態（git status: modified 3 files）。次セッション開始時に working tree が dirty な状態で再開する。
+VOICEVOX 接続そのものは未完遂（ユーザーが VOICEVOX 設定で `0.0.0.0` バインドに変更する作業が次セッション）。
 
 ---
 
 ## 成果と変更箇所 (Outcomes & Changed Files)
 
-### Phase 3 編集（git status: modified、未コミット）
+### 新規ファイル
 
-- `.claude/skills/interaction/SKILL.md` (216 → 237 行、+21)
-  - 冒頭付近に「⚡ voice 入力時の上書きチェックリスト（最重要）」セクション新設（4 項目チェックリスト + plan.voice.speak 上書きの根拠説明）
-  - 4-b の `record_agent_experience` 表を `payload.kind` 起点に再構成。冒頭に **重要なフィールド名規約** ブロック追加（`followup_action.experience_kind` → `payload.kind` 変換ルールを明示）
-  - 4-b 状況表に「voice 入力だったが stay_silent / quiet_hours で発話を抑えた」行を追加（`boundary_respected` で記録、summary に経路明記）
+- `docs/pal-openrouter-operations.md` (新規・376 行) — pal-mcp + OpenRouter 運用の知識ベース
+  - 11 章構成: 概要 / 課金モデル / 観察したエラー実例 / モデル一覧と単価感 / pal ツール / consensus / skill 化提案 / トラブルシューティング / 推奨設定 / 参考リンク / 更新ガイドライン
+  - 404（`gemini-3-pro-preview`） / 402（`gpt-5.2-pro`）の生メッセージを保存（後で同症状を照合可能）
+  - モデル別予約額試算（gpt-5.2-pro $7.86 / gpt-5.2 $2.62 / gemini-2.5-pro $1.31）
+- `docs/archive/handover-20260509-1049.md` (前回 HANDOVER の退避)
+- `docs/archive/handover-20260520-1123.md` (今回の handover skill 実行時の退避)
 
-- `.claude/rules/tts.md` (31 → 51 行、+20)
-  - 「エンジン使い分け」表を新設（ElevenLabs / VOICEVOX の強み・弱み・使う場面）
-  - VOICEVOX 起動前提（`localhost:50021`）と未起動時の ElevenLabs fallback を明記
-  - 「アンチパターン」節を新設（音声/テキスト並列必須・speak 上書き禁止・max_sentences 厳守・感情タグ誤用 NG）
+### 更新
 
-- `socialPolicy.toml`
-  - `[[person_rules]] natsuko` の `avoid_actions` に `loud_voice_during_quiet_hours` を追加（既存の `camera_speaker_after_midnight` と並列）
+- `docs/HANDOVER.md` — このファイル
+- `docs/CHRONICLE.md` — 今回のセッション 1 行追記
 
-### Global 設定（`~/.claude/`、embodied-ai 外。コミット対象外）
+### コード変更なし
 
-- `~/.claude/statusline-command.sh`（**新規**） — シェル PS1 起点の statusLine 変換スクリプト + モデル名 / コンテキスト残量 / セッションリミット表示
-- `~/.claude/settings.json`（**更新**） — `statusLine` フィールド追加
+WSL2 / Windows / ESET 設定確認のみ。Working tree でのコード変更はゼロ。
 
 ---
 
 ## 検討と意思決定 (Decisions & Rationale)
 
-### 1. voice チェックリストを SKILL.md 冒頭に置く（位置バイアス対策）
+### 1. mirrored networking の修復は完全に打ち切り
 
-- **判断:** voice 入力特例セクションは元々 4 節「3. act」内の `#### voice 入力の特例` にあったが、それを残しつつ **冒頭付近にチェックリストを duplicate 配置**
-- **理由:** CLAUDE.md 424 行が位置バイアスで Heartbeat Protocol を機能不全にしていた構造的問題と同じ。voice 入力の判断フローはセッション後半でも必ず参照される必要があるため、起動条件のすぐ後に置く。重複は「読み返す手間」を削るほうを優先
-- **代替案:** 1 箇所に集約して相互参照リンク → 不採用（リンクをたどらない場合があるため、目に入る位置に重複させる方が安全）
+- **判断:** これ以上 mirrored networking の調査・修復は行わない。`0.0.0.0` バインド + Windows Firewall scoping に切り替える
+- **理由:** Windows 再起動 + WSL update + ESET 「保護を一時停止」を試したが、`ip addr` / `/etc/resolv.conf` / `curl localhost:50021` すべて NAT モードの徴候のまま不変。Windows 11 24H2 build 26200 系 + ESET の組み合わせで mirrored が機能しない事象は環境特有のバグと判断。pal consensus の GPT-5.2（for）も「ROI 悪い、追加投資は 30〜60 分以内に限定」と評価
+- **代替案:**
+  - ESET ファイアウォールモジュールを完全無効化 → 侵襲的で本セッションでは見送り。次セッションで実施したい場合のみ
+  - Windows portproxy → 永続性問題で非推奨
+  - Docker WSL 内 VOICEVOX → GPU/audio で苦労、最大複雑度
 
-### 2. `payload.kind` 表記に統一（experience_kind は注釈付きで残す）
+### 2. `0.0.0.0` バインドは家庭 LAN 限定で受け入れ可（条件付き）
 
-- **判断:** 4-b 表のデータ列見出しを `experience_kind` → `payload.kind` に変更しつつ、`followup_action.experience_kind` から変換するルールも明示
-- **理由:** 前セッションで実機呼び出し時に `Field required: kind` エラーが出た。SKILL.md 内で書き換えなしの場合、再び同じエラーを踏む。`experience_kind` は plan の戻り値構造としては存在するため、変換が必要なことを明示するのが正解
-- **代替案:** `experience_kind` を完全に削除 → 不採用（plan の戻り値を読むときに `experience_kind` キーが出てくるので、そこに気づく必要がある）
+- **判断:** VOICEVOX を `0.0.0.0:50021` で待ち受け、Windows Firewall でインバウンドを Private プロファイル + サブネット `192.168.10.0/24` に限定
+- **理由:** consensus（GPT-5.2 信頼度 8/10）+ 独立分析で一致した結論。家庭 LAN・デスクトップ専用・信頼端末のみ・VOICEVOX が認証なし TTS（破壊操作なし）という条件下では、最大リスクは LAN 内端末からの CPU 消費 DoS 程度
+- **重要前提:** Windows のネットワークプロファイルが Public ではなく Private になっていること。誤って Public のまま外で WiFi に繋ぐと露出
+- **代替案:** SSH tunnel（追加運用コスト）、portproxy（IPv4/IPv6 混乱・永続性不安定）、Docker WSL 内（重い）
 
-### 3. `loud_voice_during_quiet_hours` を新設（既存の camera_speaker_after_midnight と並列）
+### 3. OpenRouter の課金モデルを正しく理解し monthly limit を引き上げる
 
-- **判断:** `camera_speaker_after_midnight` を変更せず、新たな avoid_action として `loud_voice_during_quiet_hours` を追加
-- **理由:** 既存の "after_midnight" は時刻ベース（00:00-）に対応するが、SKILL.md の voice チェックリストで参照したいのは quiet_hours（policy 設定値、現在 `00:00-07:00`）に基づく抑制。policy 名と avoid_action 名を整合させた
-- **副作用:** plan の `forbidden_actions` にこの 2 つが乗る場面で、Claude の voice 出力が抑止される（_pick_must_lists の挙動で。ただし plan 側の参照実装は確認していない）
+- **判断:** OpenRouter API key の monthly limit を **$10〜$20** に引き上げる
+- **理由:** 402 エラーは「実残高」ではなく「リクエスト時の `max_tokens × 出力単価` 予約額が key の monthly limit を超える」事象。`gpt-5.2-pro` で `max_tokens=65536` の予約は約 $7.86 必要、現行 key 上限が約 $3 弱だったため弾かれた
+- **推奨額:** シングル `chat` なら $10、consensus 並列なら $20、高単価モデル頻用なら $30+
 
-### 4. tts.md にアンチパターン節（rules/ ファイル粒度の例外）
+### 4. pal の可用性事前チェックは skill 化が筋
 
-- **判断:** 通常 rules/ は「事実とフォーマットの定義」に絞るが、tts.md だけは「アンチパターン」節を含める
-- **理由:** 音声出力は失敗しやすい（喋るな決定を破る、片方だけ出す、感情タグ誤用）。これらは SKILL.md の中で interaction フローの一部として書いているが、tts.md を編集中の Claude（say の引数を組み立てている瞬間）にも目に入る位置に置きたい
-- **代替案:** SKILL.md 一極集中 → 不採用（rules はパス条件で注入されるので、tts-mcp/**/*.py 編集時に tts.md だけが load される。SKILL.md は別タイミング）
+- **判断:** `pal-consult` という skill を作る方針（実装は次セッション）
+- **理由:** タスク単位で自動発動させたい / 毎回コマンド打ちたくない / Memory に記録された好み「自動発動は skills、明示起動は commands」と合致 / rules は paths 条件でツール呼び出し時に発動しない
+- **配置場所:** プロジェクト内 (`embodied-ai/.claude/skills/pal-consult/SKILL.md`) と global (`~/.claude/skills/pal-consult/SKILL.md`) の判断は pal-mcp の登録場所による。**次セッションで `.mcp.json` の場所を確認した上で決定**
 
-### 5. statusLine 設定は user global（プロジェクトに含めない）
+### 5. pal-openrouter-operations.md は docs 配下に常設
 
-- **判断:** `/statusline` 由来の変更は `~/.claude/` 配下で完結。プロジェクトの `.claude/` には書き込まない
-- **理由:** ステータスラインは作業環境の設定で、embodied-ai プロジェクトの動作には影響しない。プロジェクト .claude/ に書くと他プロジェクトでも同じ statusline が強制される可能性
-- **副作用:** このプロジェクトを別マシンで開いた時にステータスラインの設定は引き継がれない（必要なら別途再設定）
+- **判断:** 知識ベースとして `docs/pal-openrouter-operations.md` に集約。skill が必要に応じて参照する
+- **理由:** 詳細な単価表 / エラー実例 / モデル別フォールバック表は SKILL.md に書くと肥大化する。skill は短く保ち、参照先として docs に切り出す（CLAUDE.md 縮約と同じ設計判断）
 
 ---
 
 ## ハマった点・失敗したアプローチ (Friction & Anti-patterns)
 
-### F-1: コミットが拒否された（次セッション開始時の状態に注意）
+### F-1: WSL2 mirrored mode が複数の対処を経ても効かず
 
-- **問題:** Phase 3 の 6 タスク編集後、コミットコマンドが Denied by user で拒否された
-- **試したこと:** `docs(interaction): clarify voice override checklist and kind/experience_kind mapping` のメッセージで `git commit` 実行
-- **結果:** ユーザー判断で拒否。理由は確認していない（メッセージ調整希望か、まだ commit したくないか、編集内容の見直し希望かは不明）
-- **次セッションで:** dirty working tree のまま再開。`git status` で modified を確認 → ユーザーに「Phase 3 の編集をコミットするか / 見直すか」を聞く
+- **問題:** `.wslconfig` 設定正・WSL バージョン正・カーネル正・Windows ビルド正にもかかわらず、Windows 再起動 + `wsl --update` + `wsl --shutdown` + ESET 「保護を一時停止」を全部試して `ip addr` が NAT のまま
+- **試したこと:**
+  - Windows 再起動（電源 off → on）
+  - `wsl --update`
+  - 複数回の `wsl --shutdown` → 再起動（uptime=1min を毎回確認）
+  - ESET の「保護を一時停止」（10 分間）
+- **結果:** `ip addr` に Windows 側 NIC が一切現れない、`/etc/resolv.conf` の nameserver は `10.255.255.254` のまま、`curl localhost:50021/version` は timeout (exit 28)
+- **学び:** ESET の「保護を一時停止」では **ネットワークフィルタリングドライバ自体は動き続ける**。これを切るにはサービス完全停止 or アンインストールが必要。これ以上の侵襲は ROI が悪いので mirrored 諦め
 
-### F-2: 既存セッション継続 vs 新規 Agent 生成（statusline 2 回目）
+### F-2: pal consensus で 2/3 モデルが API エラー
 
-- **問題:** `/statusline` を 2 回目呼んだ時、前回の statusline-setup エージェントを SendMessage で継続するか、新規 Agent を生成するか迷った
-- **判断:** コマンド定義 `Create an Agent with subagent_type "statusline-setup"` に従って新規 Agent を生成
-- **結果:** うまくいった（既存の `~/.claude/statusline-command.sh` を読み取って差分追加）
-- **学び:** スラッシュコマンドの instruction が "Create an Agent" と明示している場合は、既存セッションがあっても新規生成する。SendMessage は Claude が自発的に判断して使うとき向け
+- **問題:** consensus を 3 モデル（for: gpt-5.2 / against: gemini-3-pro-preview / neutral: gpt-5.2-pro）で実行したが、2 つがエラー
+- **エラー内容:**
+  - `google/gemini-3-pro-preview`: **404 No endpoints found**（OpenRouter 側で当該モデル提供停止）
+  - `openai/gpt-5.2-pro`: **402 max_tokens=65536 / can only afford 24710**（key の monthly limit が予約額に届かない）
+- **学び:**
+  - `listmodels` は「ラインナップ」であって「ライブ可用性」ではない。preview 系（gemini-3-pro-preview 等）は通る日と通らない日がある
+  - pal の各ツールは `max_tokens` パラメータを引数で受け付けないので、内部固定値（65536）でのコスト試算が必要
+  - **次回 consensus する時は安定版モデルを選ぶ**（gemini-2.5-pro / gpt-5.2 / claude-opus-4.5 等）
 
-### F-3 (構造的): SKILL.md の重複情報の管理コスト
+### F-3: pal `--max_tokens` 引数を絞れない
 
-- **問題:** voice チェックリストを冒頭に追加したことで、`#### voice 入力の特例`（4 節内）と内容が重複
-- **影響:** 今後どちらかを更新したらもう片方も更新する必要がある
-- **対処方針:** 次の Phase 3 微調整があれば「voice チェックリストは冒頭が source of truth、4 節は要約」とどちらかに役割を寄せる。今は両方を完全版にしておく（位置バイアス対策優先）
+- **問題:** `gpt-5.2-pro` の 402 を回避するため `max_tokens` を絞りたいが、ツール定義（mcp__pal__consensus 等）に `max_tokens` パラメータが存在しない
+- **学び:** pal の構成変更はしたくないので、monthly limit を引き上げるか安価モデルに切り替えるしかない
 
 ---
 
 ## 次にやること (Next Steps)
 
-### 即時（最初のターンで判断する）
+### Phase 1 完遂（VOICEVOX 接続 — 最優先）
 
-1. [ ] `git status` で modified ファイル 3 件を確認 → ユーザーに以下を聞く:
-   - Phase 3 の編集内容を読み直してコミットするか
-   - メッセージを変えてコミットするか
-   - 編集をロールバックするか
-2. [ ] コミット決まったら `.claude/skills/interaction/SKILL.md` `.claude/rules/tts.md` `socialPolicy.toml` の 3 つを 1 コミットで（前回の HANDOVER で提案したメッセージ案: `docs(interaction): clarify voice override checklist and kind/experience_kind mapping`）
+1. [ ] VOICEVOX の設定 → 詳細設定 → **「他のホストからの接続を許可」を ON**（or「ホスト」項目を `0.0.0.0`）
+2. [ ] VOICEVOX を**完全に終了 → 再起動**（GUI 内の「エンジンの再起動」だけだと反映されないことあり）
+3. [ ] Windows 側 `netstat -an | findstr 50021` で `0.0.0.0:50021 ... LISTENING` 確認
+4. [ ] Windows Firewall インバウンドルールを確認（Private プロファイルのみ、サブネット `192.168.10.0/24` に限定推奨）
+5. [ ] WSL から `curl http://localhost:50021/version` で接続テスト → JSON 文字列が返れば成功
+6. [ ] WSL から `curl -s http://localhost:50021/speakers | python3 -c "import json,sys; d=json.load(sys.stdin); print(f'speakers: {len(d)}')"` で speaker 一覧確認
 
-### Phase 1 完了待ち（ユーザー作業）
+### Phase 1 完遂（API キー、任意）
 
-3. [ ] `.mcp.json` の `ELEVENLABS_API_KEY` プレースホルダを実キーに置換
-4. [ ] （任意）VOICEVOX エンジン起動: GUI 版（https://voicevox.hiroshiba.jp/）or Docker 版（`docker run -d --name voicevox --restart unless-stopped -p 50021:50021 voicevox/voicevox_engine:cpu-ubuntu20.04-latest`）
-5. [ ] Claude Code 再起動（`/exit` → `claude`）
-6. [ ] `mcp__tts__say` がツール一覧に出ることを確認
-7. [ ] 接続確認: `curl http://localhost:50021/version`（VOICEVOX 起動済みなら version 文字列）
+7. [ ] ElevenLabs API キーを `/home/slmbrcat/projects/embodied-ai/.mcp.json` の `ELEVENLABS_API_KEY` プレースホルダに入れる（VOICEVOX 主軸ならスキップ可）
+8. [ ] Claude Code を `/exit` → `claude` で再起動
+9. [ ] `mcp__tts__say` がツール一覧に出ることを確認
+10. [ ] `mcp__tts__say(text="こんにちは", engine="voicevox", voicevox_speaker=3, speaker="local")` で素疎通確認
 
-### Phase 4: 試運転（P0/P1）
+### OpenRouter monthly limit 引き上げ
 
-8. [ ] **E-1 テキスト 1 ターン（フル）**: `plan_response_tool` 経由を含めて改めて試運転（前セッションでスキップした項目）
-9. [ ] **E-2 `/voice` 1 ターン**: API キーと VOICEVOX 起動が整ってから
-10. [ ] **E-3 quiet_hours 模擬**: 深夜帯（22:00-07:00）または fixture
-11. [ ] **E-4 wifi-cam `listen` 連携**（任意・P2）
+11. [ ] https://openrouter.ai/settings/keys で当該 API key の monthly limit を **$10〜$20** に引き上げる
+12. [ ] 引き上げ後、consensus で `gpt-5.2-pro` が通るか確認したい場合は別途検証
 
-**マイルストーン到達条件:** E-1〜E-3 が合格基準を満たす（合格基準は `docs/archive/handover-20260506-1531.md` 末尾参照）。
+### pal-consult skill の実装
+
+13. [ ] `.mcp.json` の pal-mcp 登録場所を確認（プロジェクト内 or global）
+14. [ ] `pal-consult/SKILL.md` を作成（雛形は `docs/pal-openrouter-operations.md` §7-3 参照）
+15. [ ] SKILL.md から `docs/pal-openrouter-operations.md` を参照する形にして、SKILL は短く保つ
+
+### Phase 4 試運転（マイルストーン到達）
+
+16. [ ] **E-1 テキスト 1 ターン（フル）**: `plan_response_tool` 経由を含めて改めて試運転
+17. [ ] **E-2 `/voice` 1 ターン**: VOICEVOX で音声合成、speaker=local
+18. [ ] **E-3 quiet_hours 模擬**: 深夜帯（22:00-07:00）or fixture で `say` が呼ばれないことを確認
+19. [ ] **E-4 wifi-cam `listen` 連携**（任意・P2）
+
+合格基準は `docs/archive/handover-20260506-1531.md` 末尾参照。
+
+### 諦めなければの追加調査（mirrored を本気で直したい場合）
+
+20. [ ] ESET ファイアウォールモジュールを**完全無効化**（保護一時停止ではなく、サービス停止 or アンインストール）→ `wsl --shutdown` → 再起動 → 再確認
+21. [ ] それでも駄目なら受容するか、ESET 自体を別の AV に変える検討
 
 ### 継続改善: メタ層（Step 5、観測ベース着手）
 
-12. [ ] `scripts/meta_layer_observation.py` 作成（social.db 週次集計: followup 取りこぼし率 / record なし outgoing 連発 / interpretation_shift 後の user_correction 検出）
-13. [ ] 1 週間以上運用 → トリガーが立った時点で対応シグナル（S1/S2/S3）から着手
+22. [ ] `scripts/meta_layer_observation.py` 作成（social.db 週次集計）
+23. [ ] 1 週間運用後、トリガー成立シグナルから着手
 
 ---
 
@@ -140,30 +162,35 @@
 
 ### Critical Files for Implementation
 
-- `/home/slmbrcat/projects/embodied-ai/.mcp.json` — tts エントリ完成、API キーのみ置換待ち
-- `/home/slmbrcat/projects/embodied-ai/.claude/skills/interaction/SKILL.md` — Phase 3 完了（未コミット）。voice チェックリスト + kind 表記統一済み
-- `/home/slmbrcat/projects/embodied-ai/.claude/rules/tts.md` — Phase 3 完了（未コミット）。エンジン使い分け + アンチパターン追加済み
-- `/home/slmbrcat/projects/embodied-ai/socialPolicy.toml` — Phase 3 完了（未コミット）。natsuko avoid_actions 拡張済み
+- `/home/slmbrcat/projects/embodied-ai/.mcp.json` — tts エントリ完成、API キー（ElevenLabs）のみ置換待ち
+- `/home/slmbrcat/projects/embodied-ai/docs/pal-openrouter-operations.md` — **新規。pal-mcp + OpenRouter の運用ナレッジ集積。今後の pal 利用時に参照**
 
-### `record_agent_experience` のフィールド対応表（**変わらず重要**）
+### consensus 試行のスナップショット（2026-05-20 セッション）
 
-| 場面 | フィールド名 |
+問題: `0.0.0.0 バインドのセキュリティ判断` を 3 モデルで評価
+
+| モデル | スタンス | 結果 |
+|---|---|---|
+| `openai/gpt-5.2` | for | ✅ 成功、信頼度 8/10、「Conditionally acceptable」と評価 |
+| `google/gemini-3-pro-preview` | against | ❌ 404 No endpoints found |
+| `openai/gpt-5.2-pro` | neutral | ❌ 402 max_tokens 予約超過 |
+
+結論: GPT-5.2 + 独立分析で意思決定可能（`0.0.0.0` バインド + Windows Firewall scoping）。
+
+### 推奨モデル選択（次回 consensus 時）
+
+| 用途 | 第一候補 |
 |---|---|
-| `plan_response_tool` の `followup_action` 戻り値 | `experience_kind` |
-| `record_agent_experience` の payload 引数 | **`kind`** |
+| 通常の chat | `openai/gpt-5.2` |
+| 大量コンテキスト | `x-ai/grok-4.1-fast`（2M context） |
+| consensus | OpenAI + Google + Anthropic 各 1（`gpt-5.2` / `gemini-2.5-pro` / `claude-opus-4.5`） |
 
-Auto Memory にも `feedback_record_agent_experience_kind.md` として保存済み。
+詳細は `docs/pal-openrouter-operations.md` §6 参照。
 
-### コミット拒否されたコミットメッセージ案
+### 当時の WSL / Windows 環境
 
-```
-docs(interaction): clarify voice override checklist and kind/experience_kind mapping
-
-- SKILL.md: prepend voice-input override checklist near the top so it survives late-session position bias
-- SKILL.md: rewrite the 4-b record_agent_experience tables to mark payload.kind as the actual API field and explain the followup_action.experience_kind → payload.kind conversion
-- SKILL.md: add a row covering "voice input but suppressed" so the boundary_respected summary records why
-- rules/tts.md: add ElevenLabs / VOICEVOX engine selection guide and an antipattern block (parallel text+voice required, no rogue speak overrides)
-- socialPolicy.toml: extend natsuko avoid_actions with loud_voice_during_quiet_hours so plan's forbidden_actions stays aligned with the new SKILL contract
-```
-
-メッセージ調整したい場合の起点として残しておく。
+- WSL バージョン: 2.4.12.0
+- カーネル: 5.15.167.4-microsoft-standard-WSL2
+- Windows ビルド: 26200.8246（24H2 系）
+- ESET: 有効（保護一時停止後もネットワークフィルタドライバは動作）
+- `.wslconfig`: `[wsl2]\nswap=8388608000\nnetworkingMode=mirrored\n`（中身は正、反映されない）
