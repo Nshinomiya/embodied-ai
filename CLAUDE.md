@@ -2,7 +2,7 @@
 
 Claude に身体（目・首・耳・声・脳）を与え、その上に sociality（社会的中間層）を積む MCP サーバー群。
 
-**質問に答える前・変更を加える前**: 必ず `docs/CHRONICLE.md` と `docs/HANDOVER.md` を読む。
+**質問に答える前・変更を加える前**: 必ず `` と `docs/HANDOVER.md` を読む。
 
 ## 設計原則: 身体メタファー三層モデル
 
@@ -18,6 +18,8 @@ Claude に身体（目・首・耳・声・脳）を与え、その上に social
 
 ```
 embodied-ai/
+├── docs/         # プロジェクトの経緯や意思決定等引き継ぎ事項等
+    └── archive/              # プロジェクト経緯の詳細、過去に何をしていたか、取りこぼしたタスクについて確認できる（HANDOVER.mdの過去分）
 ├── usb-webcam-mcp/         # 目（USB）
 ├── wifi-cam-mcp/           # 目・首・耳（Wi-Fi PTZ）
 ├── tts-mcp/                # 声（ElevenLabs / VOICEVOX）
@@ -34,12 +36,9 @@ embodied-ai/
 
 ## 規約と運用
 
+- セッション開始時に必ず以下を読むこと
+  - @../docs/HANDOVER.md
+  - @../docs/CHRONICLE.md
 - 各サブプロジェクトの開発規約・ツール一覧は `.claude/rules/`（パス条件で自動注入される）
 - 対話応答ループは `.claude/skills/interaction/SKILL.md`
 - セキュリティ: `.env` は絶対コミットしない
-
-## 関連リンク
-
-- [MCP Protocol](https://modelcontextprotocol.io/)
-- [go2rtc](https://github.com/AlexxIT/go2rtc) — RTSP / オーディオバックチャンネル
-- [claude-code-webui](https://github.com/sugyan/claude-code-webui) — モバイル操作用

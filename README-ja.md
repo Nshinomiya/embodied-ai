@@ -578,3 +578,9 @@ MIT License
 - [Rumia-Channel](https://github.com/Rumia-Channel) - ONVIF対応のプルリクエスト（[#5](https://github.com/kmizu/embodied-claude/pull/5)）
 - [fruitriin](https://github.com/fruitriin) - 内受容感覚（interoception）hookに曜日情報を追加（[#14](https://github.com/kmizu/embodied-claude/pull/14)）
 - [sugyan](https://github.com/sugyan) - [claude-code-webui](https://github.com/sugyan/claude-code-webui)（外出散歩時の操作UIとして使用）
+
+## 関連リンク
+
+- [MCP Protocol](https://modelcontextprotocol.io/)
+- [go2rtc](https://github.com/AlexxIT/go2rtc) — RTSP / オーディオバックチャンネル
+- [claude-code-webui](https://github.com/sugyan/claude-code-webui) — モバイル操作用
